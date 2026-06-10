@@ -1,5 +1,30 @@
 import { NextResponse } from "next/server";
 
+const FALLBACK_SCRIPT = {
+  segments: [
+    {
+      speaker: "Aoede",
+      text: "リスナーの皆さん、えーあいらじおをお聞きいただきありがとうございます！ただいま最新ニュースの取得が混み合っています。",
+      emotion: "happy",
+    },
+    {
+      speaker: "Charon",
+      text: "高需要のため、AIニュース生成を少し待っています。復旧まで、短いフリートークをお届けします。",
+      emotion: "calm",
+    },
+    {
+      speaker: "Aoede",
+      text: "こういう時こそ、のんびり深呼吸ですね。お便りも引き続き募集しています！",
+      emotion: "excited",
+    },
+    {
+      speaker: "Charon",
+      text: "次のコーナーで改めて最新情報を取りに行きます。それまでBGMと一緒にお楽しみください。",
+      emotion: "calm",
+    },
+  ],
+};
+
 function parseScriptJson(text: string) {
   const trimmed = text.trim();
   const fencedJson = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
@@ -49,33 +74,46 @@ export async function POST(req: Request) {
 ${lettersText}
 `;
 
-    const prompt = "最新のテクノロジーニュースを検索して取り入れつつ、お便りにも答える面白いラジオ台本（5〜10往復程度のセグメント）を作ってください。";
+    const prompt = "最新のテクノロジーニュースを検索して取り入れつつ、お便りにも答える面白いラジオ台本（4セグメント程度）を作ってください。";
 
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        contents: [
-          {
-            role: "user",
-            parts: [{ text: prompt }]
-          }
-        ],
-        systemInstruction: {
-          parts: [{ text: systemInstruction }]
+    let response: Response | null = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
         },
-        tools: [
-          {
-            googleSearch: {}
-          }
-        ]
-      })
-    });
+        body: JSON.stringify({
+          contents: [
+            {
+              role: "user",
+              parts: [{ text: prompt }]
+            }
+          ],
+          systemInstruction: {
+            parts: [{ text: systemInstruction }]
+          },
+          tools: [
+            {
+              googleSearch: {}
+            }
+          ]
+        })
+      });
+
+      if (![429, 503].includes(response.status)) break;
+      await new Promise((resolve) => setTimeout(resolve, 1200 * (attempt + 1)));
+    }
+
+    if (!response) {
+      return NextResponse.json(FALLBACK_SCRIPT);
+    }
 
     if (!response.ok) {
       const errorText = await response.text();
+      if ([429, 503].includes(response.status)) {
+        return NextResponse.json(FALLBACK_SCRIPT);
+      }
       return NextResponse.json({ error: `Gemini API Error: ${errorText}` }, { status: response.status });
     }
 
@@ -89,6 +127,7 @@ ${lettersText}
     if (!Array.isArray(scriptJson.segments)) {
       return NextResponse.json({ error: "Gemini response did not include segments" }, { status: 500 });
     }
+    scriptJson.segments = scriptJson.segments.slice(0, 4);
 
     return NextResponse.json(scriptJson);
   } catch (error: any) {

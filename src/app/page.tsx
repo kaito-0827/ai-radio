@@ -174,8 +174,9 @@ export default function Home() {
         console.error("Failed to post system announcement to chat:", chatErr);
       }
 
-      // 3. Parallel fetch TTS audio for all segments to prevent lagging
-      const ttsPromises = segments.map(async (segment) => {
+      // 3. Generate TTS audio sequentially to avoid Gemini quota spikes
+      const ttsResults = [];
+      for (const segment of segments) {
         const ttsResponse = await fetch("/api/radio-tts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -187,13 +188,11 @@ export default function Home() {
         }
 
         const ttsData = await ttsResponse.json();
-        return {
+        ttsResults.push({
           segment,
           audioContent: ttsData.audioContent as string,
-        };
-      });
-
-      const ttsResults = await Promise.all(ttsPromises);
+        });
+      }
 
       // 4. Queue everything to the audio engine
       ttsResults.forEach((result) => {
@@ -221,8 +220,9 @@ export default function Home() {
           });
         } catch (chatErr) {}
 
-        // Parallel fetch TTS audio for backup segments
-        const ttsPromises = backupSegments.map(async (segment) => {
+        // Generate TTS audio sequentially to avoid Gemini quota spikes
+        const ttsResults = [];
+        for (const segment of backupSegments) {
           const ttsResponse = await fetch("/api/radio-tts", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -234,13 +234,11 @@ export default function Home() {
           }
 
           const ttsData = await ttsResponse.json();
-          return {
+          ttsResults.push({
             segment,
             audioContent: ttsData.audioContent as string,
-          };
-        });
-
-        const ttsResults = await Promise.all(ttsPromises);
+          });
+        }
 
         ttsResults.forEach((result) => {
           audioEngine.queueSegment(result.segment, result.audioContent);

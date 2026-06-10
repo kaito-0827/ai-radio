@@ -1,5 +1,11 @@
 import { NextResponse } from "next/server";
 
+const sampleRate = 24000;
+
+function silentPcmBase64(seconds: number = 1) {
+  return Buffer.alloc(sampleRate * seconds * 2).toString("base64");
+}
+
 export async function POST(req: Request) {
   try {
     const { text, speaker } = await req.json();
@@ -15,32 +21,53 @@ export async function POST(req: Request) {
     // Aoede (Female), Charon (Male)
     const voiceName = speaker === "Aoede" ? "Aoede" : "Charon";
 
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-tts-preview:generateContent?key=${apiKey}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [{ text: `Say in Japanese with a natural radio host delivery: ${text}` }]
-          }
-        ],
-        generationConfig: {
-          responseModalities: ["AUDIO"],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: {
-                voiceName: voiceName
+    let response: Response | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-tts-preview:generateContent?key=${apiKey}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [{ text: `Say in Japanese with a natural radio host delivery: ${text}` }]
+            }
+          ],
+          generationConfig: {
+            responseModalities: ["AUDIO"],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: {
+                  voiceName: voiceName
+                }
               }
             }
           }
-        }
-      })
-    });
+        })
+      });
+
+      if (![429, 503].includes(response.status)) break;
+      await new Promise((resolve) => setTimeout(resolve, 1500 * (attempt + 1)));
+    }
+
+    if (!response) {
+      return NextResponse.json({
+        audioContent: silentPcmBase64(),
+        mimeType: "audio/pcm;rate=24000",
+        degraded: true,
+      });
+    }
 
     if (!response.ok) {
       const errorText = await response.text();
+      if ([429, 503].includes(response.status)) {
+        return NextResponse.json({
+          audioContent: silentPcmBase64(),
+          mimeType: "audio/pcm;rate=24000",
+          degraded: true,
+        });
+      }
       return NextResponse.json({ error: `Gemini API Error: ${errorText}` }, { status: response.status });
     }
 
