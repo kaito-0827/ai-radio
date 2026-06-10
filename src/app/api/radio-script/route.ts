@@ -1,5 +1,19 @@
 import { NextResponse } from "next/server";
 
+function parseScriptJson(text: string) {
+  const trimmed = text.trim();
+  const fencedJson = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const candidate = fencedJson?.[1] ?? trimmed;
+  const firstBrace = candidate.indexOf("{");
+  const lastBrace = candidate.lastIndexOf("}");
+
+  if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
+    throw new Error("Gemini response did not contain a JSON object");
+  }
+
+  return JSON.parse(candidate.slice(firstBrace, lastBrace + 1));
+}
+
 export async function POST(req: Request) {
   try {
     const { letters } = await req.json();
@@ -26,7 +40,10 @@ export async function POST(req: Request) {
 - その後、届いたお便り（以下に記載）を最低1つ読み上げ、それに対して二人が感想やアドバイスを語り合います。
 - 最後にエンディングトークで締めます。
 - 対話は自然で、相槌や軽い雑談を交え、リスナーを退屈させないようにしてください。
-- 応答は必ず指定のJSONスキーマに従ってください。スピーカー名は "Aoede" または "Charon" のみです。感情（emotion）も適切に割り当ててください。
+- 応答はJSONオブジェクトのみを返してください。Markdownや説明文は不要です。
+- JSON形式は {"segments":[{"speaker":"Aoede","text":"...","emotion":"happy"}]} です。
+- speaker は "Aoede" または "Charon" のみです。
+- emotion は "happy", "calm", "excited", "sad" のいずれかです。
 
 届いたお便り:
 ${lettersText}
@@ -53,28 +70,7 @@ ${lettersText}
           {
             googleSearch: {}
           }
-        ],
-        generationConfig: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: "OBJECT",
-            properties: {
-              segments: {
-                type: "ARRAY",
-                items: {
-                  type: "OBJECT",
-                  properties: {
-                    speaker: { type: "STRING", enum: ["Aoede", "Charon"] },
-                    text: { type: "STRING" },
-                    emotion: { type: "STRING", enum: ["happy", "calm", "excited", "sad"] }
-                  },
-                  required: ["speaker", "text", "emotion"]
-                }
-              }
-            },
-            required: ["segments"]
-          }
-        }
+        ]
       })
     });
 
@@ -89,7 +85,11 @@ ${lettersText}
       return NextResponse.json({ error: "Failed to parse script from Gemini response" }, { status: 500 });
     }
 
-    const scriptJson = JSON.parse(scriptText);
+    const scriptJson = parseScriptJson(scriptText);
+    if (!Array.isArray(scriptJson.segments)) {
+      return NextResponse.json({ error: "Gemini response did not include segments" }, { status: 500 });
+    }
+
     return NextResponse.json(scriptJson);
   } catch (error: any) {
     return NextResponse.json({ error: error.message || "Internal Server Error" }, { status: 500 });

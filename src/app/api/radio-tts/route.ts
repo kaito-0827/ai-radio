@@ -15,7 +15,7 @@ export async function POST(req: Request) {
     // Aoede (Female), Charon (Male)
     const voiceName = speaker === "Aoede" ? "Aoede" : "Charon";
 
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-tts-preview:generateContent?key=${apiKey}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -23,16 +23,16 @@ export async function POST(req: Request) {
       body: JSON.stringify({
         contents: [
           {
-            parts: [{ text: text }]
+            parts: [{ text: `Say in Japanese with a natural radio host delivery: ${text}` }]
           }
         ],
         generationConfig: {
-          responseMimeType: "audio/pcm"
-        },
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: {
-              voiceName: voiceName
+          responseModalities: ["AUDIO"],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: {
+                voiceName: voiceName
+              }
             }
           }
         }
