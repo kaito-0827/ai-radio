@@ -1,0 +1,12 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Custom nested path for AI Radio in Firestore
+    match /artifacts/ai-radio-default/public/data/letters/{document} {
+      allow read, write: if true; // Allows guest letters submission and retrieval
+    }
+    match /artifacts/ai-radio-default/public/data/chats/{document} {
+      allow read, write: if true; // Allows open live chat reading and writing
+    }
+  }
+}
