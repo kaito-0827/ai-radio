@@ -21,9 +21,8 @@ export async function POST(req: Request) {
     // Aoede (Female), Charon (Male)
     const voiceName = speaker === "Aoede" ? "Aoede" : "Charon";
 
-    let response: Response | null = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-tts-preview:generateContent?key=${apiKey}`, {
+    const requestAudio = () =>
+      fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-tts-preview:generateContent?key=${apiKey}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -47,16 +46,10 @@ export async function POST(req: Request) {
         })
       });
 
-      if (![429, 503].includes(response.status)) break;
-      await new Promise((resolve) => setTimeout(resolve, 1500 * (attempt + 1)));
-    }
-
-    if (!response) {
-      return NextResponse.json({
-        audioContent: silentPcmBase64(),
-        mimeType: "audio/pcm;rate=24000",
-        degraded: true,
-      });
+    let response = await requestAudio();
+    if (response.status === 503) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      response = await requestAudio();
     }
 
     if (!response.ok) {
