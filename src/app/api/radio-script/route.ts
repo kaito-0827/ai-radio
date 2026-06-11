@@ -74,10 +74,11 @@ export async function POST(req: Request) {
 2. Charon (カロン - 男性パーソナリティ): 落ち着いたトーン、技術的な解説が得意、Aoedeのボケに冷静にツッコミを入れる。声質は男性。
 
 台本の構成ルール：
-- 最初は短いオープニングトークから入り、最新ニュースを1つか2つ紹介し、解説や議論を行います。
-- その後、届いたお便り（以下に記載）を最低1つ読み上げ、それに対して二人が感想やアドバイスを語り合います。
+- 番組は24時間連続生放送です。毎回の番組開始の挨拶や自己紹介は不要で、コーナーの導入から自然に始めてください。
+- お便りが届いている場合は、必ず最初にお便りコーナーから始めてください。お便りを読み上げ、二人が感想やアドバイスを語り合います。
 - お便りに質問や話題が含まれる場合は、Google Searchでリアルタイムに最新情報を調べ、事実に基づいて具体的に答えてください。憶測で答えてはいけません。
-- 最後にエンディングトークで締めます。
+- その後、最新ニュースを1つか2つ紹介し、解説や議論を行います。
+- 最後は次のコーナーに自然につながる一言で締めます（番組全体の終了の挨拶はしない）。
 - 対話は自然で、相槌や軽い雑談を交え、リスナーを退屈させないようにしてください。
 - 応答はJSONオブジェクトのみを返してください。Markdownや説明文は不要です。
 - JSON形式は {"segments":[{"speaker":"Aoede","text":"...","emotion":"happy"}]} です。
@@ -91,7 +92,7 @@ ${lettersText}
     const systemInstruction = breaking ? bulletinInstruction : regularInstruction;
     const prompt = breaking
       ? "このニュースを検索で確認し、ラジオのニュース速報台本（2〜4セグメント）をJSONで作ってください。"
-      : "最新のテクノロジーニュースを検索して取り入れつつ、お便りにも答える面白いラジオ台本（4セグメント程度）を作ってください。";
+      : "最新のテクノロジーニュースを検索して取り入れつつ、お便りにも答える面白いラジオ台本（4〜8セグメント）を作ってください。お便りがある場合は必ず冒頭で回答してください。";
 
     let response: Response | null = null;
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -149,7 +150,9 @@ ${lettersText}
     if (!Array.isArray(scriptJson.segments)) {
       return NextResponse.json({ error: "Gemini response did not include segments" }, { status: 500 });
     }
-    scriptJson.segments = scriptJson.segments.slice(0, 4);
+    // Cap generously: letter answers sit mid-script, so a tight cap would
+    // silently drop consumed letters without ever airing them
+    scriptJson.segments = scriptJson.segments.slice(0, 8);
 
     return NextResponse.json(scriptJson);
   } catch (error) {

@@ -28,6 +28,7 @@ interface Letter {
   id: string;
   sender?: string;
   content?: string;
+  createdAt?: number;
 }
 
 // Producer pacing
@@ -93,6 +94,7 @@ export default function Home() {
   const lastGenAttemptRef = useRef(0);
   const lastNewsCheckRef = useRef(0);
   const lastCleanupRef = useRef(0);
+  const lastAnnounceRef = useRef(0);
 
   // Generates TTS audio for each segment sequentially to avoid Gemini quota spikes
   const synthesizeSegments = useCallback(async (segments: ScriptSegment[]): Promise<PublishItem[]> => {
@@ -120,17 +122,19 @@ export default function Home() {
     setIsLoading(true);
 
     try {
-      // 1. Fetch unread letters from Firestore
+      // 1. Fetch unread letters from Firestore, oldest first so nobody's
+      // letter is starved by newer arrivals
       const lettersRef = collection(db, "artifacts", "ai-radio-default", "public", "data", "letters");
-      const q = query(lettersRef, where("used", "==", false), limit(3));
+      const q = query(lettersRef, where("used", "==", false), limit(10));
       const querySnapshot = await withTimeout(getDocs(q), 8_000, "letters");
 
-      const letters: Letter[] = [];
-      const letterDocIds: string[] = [];
+      const unread: Letter[] = [];
       querySnapshot.forEach((docSnap) => {
-        letters.push({ id: docSnap.id, ...docSnap.data() });
-        letterDocIds.push(docSnap.id);
+        unread.push({ id: docSnap.id, ...docSnap.data() });
       });
+      unread.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+      const letters = unread.slice(0, 3);
+      const letterDocIds = letters.map((l) => l.id);
 
       // 2. Generate the script (Gemini + Google Search, letters answered live)
       setStatusMessage("次のコーナーの台本を生成しています...");
@@ -177,16 +181,24 @@ export default function Home() {
 
       fallbackAnnouncedRef.current = false;
 
-      // Post system announcement to Firestore chats (best-effort; never block the broadcast pipeline)
-      const chatsRef = collection(db, "artifacts", "ai-radio-default", "public", "data", "chats");
-      addDoc(chatsRef, {
-        user: "System",
-        text: `🎙️ 新しいニュースコーナー「AIトレンド情報」のオンエアが始まりました！`,
-        createdAt: Date.now(),
-        isSystem: true,
-      }).catch((chatErr) => {
-        console.error("Failed to post system announcement to chat:", chatErr);
-      });
+      // Post system announcement to Firestore chats (best-effort; never block
+      // the broadcast pipeline). Corners can be generated every few minutes —
+      // announce letter corners always, generic corners at most every 5 min
+      if (letters.length > 0 || Date.now() - lastAnnounceRef.current > 5 * 60_000) {
+        lastAnnounceRef.current = Date.now();
+        const chatsRef = collection(db, "artifacts", "ai-radio-default", "public", "data", "chats");
+        addDoc(chatsRef, {
+          user: "System",
+          text:
+            letters.length > 0
+              ? `📮 お便りコーナーがオンエアされます！(${letters.length}通のお便りを読み上げ)`
+              : `🎙️ 新しいニュースコーナー「AIトレンド情報」のオンエアが始まりました！`,
+          createdAt: Date.now(),
+          isSystem: true,
+        }).catch((chatErr) => {
+          console.error("Failed to post system announcement to chat:", chatErr);
+        });
+      }
 
       setStatusMessage("新しいコーナーを放送キューに送出しました。");
     } catch (error) {

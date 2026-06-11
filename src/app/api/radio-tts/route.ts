@@ -55,8 +55,12 @@ export async function POST(req: Request) {
     if (!response.ok) {
       const errorText = await response.text();
       if ([429, 503].includes(response.status)) {
+        // Size the silence to natural reading time so the broadcast keeps a
+        // human pace under quota pressure: subtitles stay readable and the
+        // producer doesn't churn out corners every few seconds
+        const readingSeconds = Math.min(15, Math.max(3, Math.round(String(text).length * 0.15)));
         return NextResponse.json({
-          audioContent: silentPcmBase64(),
+          audioContent: silentPcmBase64(readingSeconds),
           mimeType: "audio/pcm;rate=24000",
           degraded: true,
         });
