@@ -27,6 +27,7 @@ const BASE_PATH = ["artifacts", "ai-radio-default", "public", "data"] as const;
 const segmentsCol = () => collection(db, ...BASE_PATH, "broadcast");
 const newsCol = () => collection(db, ...BASE_PATH, "broadcast_news");
 const leaderDoc = () => doc(db, ...BASE_PATH, "broadcast_meta", "leader");
+const announcementsDoc = () => doc(db, ...BASE_PATH, "broadcast_meta", "announcements");
 
 // How long a producer lease lasts before another client may take over
 const LEASE_MS = 45_000;
@@ -106,6 +107,21 @@ export async function releaseLeadership(clientId: string): Promise<void> {
   } catch {
     // Best effort; the lease expires on its own
   }
+}
+
+// Shared producer-independent throttle for generic chat announcements. Local
+// refs reset when leadership moves between browsers, so the timestamp must
+// live beside the lease metadata.
+export async function claimGenericAnnouncement(minIntervalMs: number): Promise<boolean> {
+  return runTransaction(db, async (tx) => {
+    const ref = announcementsDoc();
+    const snap = await tx.get(ref);
+    const now = Date.now();
+    const lastAt = snap.data()?.lastGenericAnnouncementAt ?? 0;
+    if (lastAt && now - lastAt < minIntervalMs) return false;
+    tx.set(ref, { lastGenericAnnouncementAt: now }, { merge: true });
+    return true;
+  });
 }
 
 // Epoch ms when the last scheduled segment finishes airing (never in the past)

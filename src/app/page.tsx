@@ -13,6 +13,7 @@ import {
   cleanupExpiredSegments,
   getRecentNewsHeadlines,
   claimNews,
+  claimGenericAnnouncement,
   withTimeout,
   PublishItem,
 } from "@/lib/broadcastBus";
@@ -94,7 +95,6 @@ export default function Home() {
   const lastGenAttemptRef = useRef(0);
   const lastNewsCheckRef = useRef(0);
   const lastCleanupRef = useRef(0);
-  const lastAnnounceRef = useRef(0);
 
   // Generates TTS audio for each segment sequentially to avoid Gemini quota spikes
   const synthesizeSegments = useCallback(async (segments: ScriptSegment[]): Promise<PublishItem[]> => {
@@ -184,8 +184,20 @@ export default function Home() {
       // Post system announcement to Firestore chats (best-effort; never block
       // the broadcast pipeline). Corners can be generated every few minutes —
       // announce letter corners always, generic corners at most every 5 min
-      if (letters.length > 0 || Date.now() - lastAnnounceRef.current > 5 * 60_000) {
-        lastAnnounceRef.current = Date.now();
+      let shouldAnnounceGeneric = false;
+      if (letters.length === 0) {
+        try {
+          shouldAnnounceGeneric = await withTimeout(
+            claimGenericAnnouncement(5 * 60_000),
+            8_000,
+            "announce-throttle"
+          );
+        } catch (announceErr) {
+          console.error("Failed to check generic announcement throttle:", announceErr);
+        }
+      }
+
+      if (letters.length > 0 || shouldAnnounceGeneric) {
         const chatsRef = collection(db, "artifacts", "ai-radio-default", "public", "data", "chats");
         addDoc(chatsRef, {
           user: "System",
