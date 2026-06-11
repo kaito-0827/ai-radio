@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { synthesizeWithVoicevox } from "@/lib/voicevox";
 
 const sampleRate = 24000;
 
@@ -8,18 +9,42 @@ function silentPcmBase64(seconds: number = 1) {
 
 export async function POST(req: Request) {
   try {
-    const { text, speaker } = await req.json();
+    const { text, emotion } = (await req.json()) as {
+      text?: string;
+      speaker?: string;
+      emotion?: string;
+    };
+
+    if (!text) {
+      return NextResponse.json({ error: "Missing text" }, { status: 400 });
+    }
+
+    // 1. Preferred: VOICEVOX (Zundamon) hosted on the VPS
+    const voicevoxUrl = process.env.VOICEVOX_URL;
+    if (voicevoxUrl) {
+      try {
+        const audioContent = await synthesizeWithVoicevox(
+          voicevoxUrl,
+          process.env.VOICEVOX_TOKEN,
+          text,
+          emotion
+        );
+        return NextResponse.json({
+          audioContent,
+          mimeType: "audio/pcm;rate=24000",
+          voice: "zundamon",
+        });
+      } catch (voicevoxErr) {
+        console.error("VOICEVOX synthesis failed; falling back to Gemini TTS:", voicevoxErr);
+      }
+    }
+
+    // 2. Fallback: Gemini TTS (voice will differ from Zundamon, but the
+    // broadcast keeps talking)
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
-      return NextResponse.json({ error: "GEMINI_API_KEY is not configured" }, { status: 500 });
+      return NextResponse.json({ error: "No TTS backend configured" }, { status: 500 });
     }
-
-    if (!text || !speaker) {
-      return NextResponse.json({ error: "Missing text or speaker" }, { status: 400 });
-    }
-
-    // Aoede (Female), Charon (Male)
-    const voiceName = speaker === "Aoede" ? "Aoede" : "Charon";
 
     const requestAudio = () =>
       fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-tts-preview:generateContent?key=${apiKey}`, {
@@ -30,7 +55,7 @@ export async function POST(req: Request) {
         body: JSON.stringify({
           contents: [
             {
-              parts: [{ text: `Say in Japanese with a natural radio host delivery: ${text}` }]
+              parts: [{ text: `Say in Japanese with a cheerful, cute radio host delivery: ${text}` }]
             }
           ],
           generationConfig: {
@@ -38,7 +63,7 @@ export async function POST(req: Request) {
             speechConfig: {
               voiceConfig: {
                 prebuiltVoiceConfig: {
-                  voiceName: voiceName
+                  voiceName: "Aoede"
                 }
               }
             }

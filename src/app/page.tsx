@@ -14,6 +14,8 @@ import {
   getRecentNewsHeadlines,
   claimNews,
   claimGenericAnnouncement,
+  writePresence,
+  clearPresence,
   withTimeout,
   PublishItem,
 } from "@/lib/broadcastBus";
@@ -42,27 +44,27 @@ const PRODUCER_TICK_MS = 5_000;
 const BACKUP_SCRIPTS: { segments: ScriptSegment[] }[] = [
   {
     segments: [
-      { speaker: "Aoede", text: "リスナーの皆さん、えーあいらじおをお聞きいただきありがとうございます！", emotion: "happy" },
-      { speaker: "Charon", text: "はい、お聞きいただきありがとうございます。只今、最新ニュースの取得システムが少し混み合っているようです。", emotion: "calm" },
-      { speaker: "Aoede", text: "そんな時もありますよね。ということで、少しの間、私たちのフリートークをお届けします！", emotion: "excited" },
-      { speaker: "Charon", text: "そうですね。皆さんは最近、どんなテクノロジーに注目していますか？ぜひチャットで教えてくださいね。", emotion: "calm" },
-      { speaker: "Aoede", text: "それでは、引き続きえーあいらじおのLofi BGMとともに、ゆったりとお楽しみください！", emotion: "happy" }
+      { speaker: "ずんだもん", text: "リスナーのみんな、えーあいらじおを聞いてくれてありがとうなのだ！", emotion: "happy" },
+      { speaker: "ずんだもん", text: "只今、最新ニュースの取得システムがちょっと混み合っているみたいなのだ。", emotion: "calm" },
+      { speaker: "ずんだもん", text: "そんな時もあるのだ。ということで、少しの間、ボクのフリートークをお届けするのだ！", emotion: "excited" },
+      { speaker: "ずんだもん", text: "みんなは最近、どんなテクノロジーに注目しているのだ？ぜひチャットで教えてほしいのだ。", emotion: "calm" },
+      { speaker: "ずんだもん", text: "それでは、引き続きえーあいらじおのLofi BGMとともに、ゆったり楽しんでほしいのだ！", emotion: "happy" }
     ]
   },
   {
     segments: [
-      { speaker: "Aoede", text: "さて、お便りのコーナーにいきたいところですが、ただいま電波の調子が悪いみたいです。", emotion: "sad" },
-      { speaker: "Charon", text: "そうですね、インターネットの宇宙を漂っているお便りを現在サーチ中です。", emotion: "calm" },
-      { speaker: "Aoede", text: "お便りはいつでも大歓迎ですので、ぜひ上のボタンから送ってみてくださいね！", emotion: "excited" },
-      { speaker: "Charon", text: "お送りいただいたメッセージは、電波が回復し次第、順次読み上げさせていただきます。", emotion: "calm" }
+      { speaker: "ずんだもん", text: "さて、お便りのコーナーにいきたいところなのだけど、ただいま電波の調子が悪いみたいなのだ。", emotion: "sad" },
+      { speaker: "ずんだもん", text: "インターネットの宇宙を漂っているお便りを、いま一生懸命サーチ中なのだ。", emotion: "calm" },
+      { speaker: "ずんだもん", text: "お便りはいつでも大歓迎だから、ぜひ上のボタンから送ってみてほしいのだ！", emotion: "excited" },
+      { speaker: "ずんだもん", text: "もらったメッセージは、電波が回復し次第、順番に読み上げるのだ。", emotion: "calm" }
     ]
   },
   {
     segments: [
-      { speaker: "Aoede", text: "ここでちょっとした雑談ですが、AIによる対話って本当に不思議ですよね。", emotion: "happy" },
-      { speaker: "Charon", text: "そうですね。私たちのこの掛け合いも、リアルタイムに生成されて声になっているのが面白いところです。", emotion: "calm" },
-      { speaker: "Aoede", text: "たまに言葉が詰まったりするかもしれませんが、それもラジオの醍醐味として楽しんでもらえると嬉しいです！", emotion: "excited" },
-      { speaker: "Charon", text: "温かい目で見守ってください。それでは次のニュースの準備が整うまで、フリートークをお送りしました。", emotion: "calm" }
+      { speaker: "ずんだもん", text: "ここでちょっとした雑談なのだ。AIがリアルタイムでラジオをやるって、本当に不思議なのだ。", emotion: "happy" },
+      { speaker: "ずんだもん", text: "ボクのこのおしゃべりも、その場で生成されて声になっているのがおもしろいところなのだ。", emotion: "calm" },
+      { speaker: "ずんだもん", text: "たまに言葉が詰まったりするかもしれないけど、それもラジオの醍醐味として楽しんでもらえるとうれしいのだ！", emotion: "excited" },
+      { speaker: "ずんだもん", text: "温かい目で見守ってほしいのだ。次のニュースの準備が整うまで、フリートークをお送りしたのだ。", emotion: "calm" }
     ]
   }
 ];
@@ -103,7 +105,7 @@ export default function Home() {
       const ttsResponse = await fetch("/api/radio-tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: segment.text, speaker: segment.speaker }),
+        body: JSON.stringify({ text: segment.text, speaker: segment.speaker, emotion: segment.emotion }),
       });
       if (!ttsResponse.ok) {
         throw new Error(`TTS generation failed for ${segment.speaker}`);
@@ -378,6 +380,23 @@ export default function Home() {
     };
   }, [isPlaying, audioEngine, clientId, produceNextCorner, checkBreakingNews]);
 
+  // Listener presence heartbeat: lets the VPS producer worker know someone is
+  // tuned in (it pauses generation when the station has no listeners)
+  useEffect(() => {
+    if (!isPlaying) return;
+    const beat = () => {
+      writePresence(clientId).catch(() => {
+        // Best effort; missing heartbeats only delay generation
+      });
+    };
+    beat();
+    const interval = setInterval(beat, 30_000);
+    return () => {
+      clearInterval(interval);
+      clearPresence(clientId);
+    };
+  }, [isPlaying, clientId]);
+
   // Consumer loop: every playing client (producer included) receives the
   // shared timeline and schedules segments at their absolute air times
   useEffect(() => {
@@ -558,15 +577,9 @@ export default function Home() {
                 <>
                   {/* Speaker Label */}
                   <div className="flex items-center space-x-2.5 mb-3">
-                    <div className={`w-2.5 h-2.5 rounded-full ${
-                      currentSegment.speaker === "Aoede"
-                        ? "bg-pink-500 shadow-[0_0_8px_#ec4899]"
-                        : "bg-cyan-400 shadow-[0_0_8px_#22d3ee]"
-                    }`} />
-                    <span className={`text-xs font-bold ${
-                      currentSegment.speaker === "Aoede" ? "text-pink-400" : "text-cyan-400"
-                    }`}>
-                      {currentSegment.speaker} ({currentSegment.speaker === "Aoede" ? "女性" : "男性"})
+                    <div className="w-2.5 h-2.5 rounded-full bg-lime-400 shadow-[0_0_8px_#a3e635]" />
+                    <span className="text-xs font-bold text-lime-300">
+                      {currentSegment.speaker}
                     </span>
                     <span className="text-[10px] text-slate-500 font-medium">
                       emotion: {currentSegment.emotion}
@@ -597,7 +610,7 @@ export default function Home() {
               <div className="mt-4 pt-3 border-t border-slate-900/60 flex items-center justify-between text-[10px] text-slate-500">
                 <div className="flex items-center space-x-1">
                   <Sparkles className="w-3 h-3 text-indigo-400" />
-                  <span>Powered by Gemini 2.5 Flash & Search Grounding</span>
+                  <span>Powered by Gemini & VOICEVOX:ずんだもん</span>
                 </div>
                 <span>全リスナー同時放送 / ローカルLo-Fiシンセサイザー</span>
               </div>
@@ -611,9 +624,9 @@ export default function Home() {
                 <Sparkles className="w-4 h-4" />
               </div>
               <div className="space-y-1">
-                <h4 className="text-xs font-semibold text-slate-300">リアルタイム生成のAI対話番組</h4>
+                <h4 className="text-xs font-semibold text-slate-300">ずんだもんのリアルタイム生成ラジオ</h4>
                 <p className="text-[11px] text-slate-400 leading-relaxed">
-                  Google Searchで最新のAI・テックニュースを収集して対話台本を生成。OpenAIの新モデル発表など重大ニュースは「ニュース速報」として番組に割り込みます。お便りへの回答も検索で裏取りした上で、全リスナーに同じ放送として届きます。
+                  パーソナリティ「ずんだもん」がGoogle Searchで最新のAI・テックニュースを収集して番組を進行。OpenAIの新モデル発表など重大ニュースは「ニュース速報」として割り込みます。お便りへの回答も検索で裏取りした上で、全リスナーに同じ放送として届きます。
                 </p>
               </div>
             </div>
@@ -643,7 +656,7 @@ export default function Home() {
 
       {/* Footer */}
       <footer className="border-t border-slate-900/60 bg-slate-950/50 py-4 text-center text-[10px] text-slate-500 mt-auto">
-        &copy; 2026 えーあいらじお (AI Radio). All rights reserved.
+        &copy; 2026 えーあいらじお (AI Radio). All rights reserved. / 音声合成: VOICEVOX:ずんだもん
       </footer>
 
       {/* Letter Modal (mounted on open so it re-reads the stored radio name) */}

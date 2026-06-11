@@ -1,0 +1,16 @@
+[Unit]
+Description=AI Radio VPS producer worker (script generation + VOICEVOX TTS)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/ai-radio/worker
+ExecStart=/usr/bin/node worker.js
+Restart=always
+RestartSec=5
+EnvironmentFile=/opt/ai-radio/worker/.env
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

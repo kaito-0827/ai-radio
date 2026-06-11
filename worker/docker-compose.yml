@@ -1,0 +1,8 @@
+services:
+  voicevox:
+    image: voicevox/voicevox_engine:cpu-latest
+    container_name: voicevox
+    ports:
+      # ローカルのみにバインド (外部公開する場合はnginx等でトークン保護すること)
+      - "127.0.0.1:50021:50021"
+    restart: always

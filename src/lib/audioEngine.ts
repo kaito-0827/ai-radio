@@ -2,7 +2,7 @@
 // Handles: Lo-Fi Background Synthesizer generation, TTS decoding & playback queue, and dynamic ducking.
 
 export interface ScriptSegment {
-  speaker: "Aoede" | "Charon";
+  speaker: string;
   text: string;
   emotion: string;
   isBreaking?: boolean;

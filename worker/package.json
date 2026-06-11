@@ -1,0 +1,17 @@
+{
+  "name": "ai-radio-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "VPS-resident producer worker for AI Radio: keeps the shared Firestore broadcast timeline filled (script generation, VOICEVOX TTS, breaking news).",
+  "main": "worker.js",
+  "scripts": {
+    "start": "node worker.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "firebase": "^12.0.0"
+  }
+}

@@ -17,6 +17,7 @@ import {
   orderBy,
   query,
   runTransaction,
+  setDoc,
   where,
   writeBatch,
 } from "firebase/firestore";
@@ -123,6 +124,23 @@ export async function releaseLeadership(clientId: string): Promise<void> {
     });
   } catch {
     // Best effort; the lease expires on its own
+  }
+}
+
+// Listener presence heartbeat. Playing clients write this periodically so the
+// VPS producer worker knows whether anyone is tuned in (it pauses generation
+// when the station has no listeners).
+export async function writePresence(clientId: string): Promise<void> {
+  await setDoc(doc(db, ...BASE_PATH, "broadcast_meta", `presence-${clientId}`), {
+    lastSeenAt: Date.now(),
+  });
+}
+
+export async function clearPresence(clientId: string): Promise<void> {
+  try {
+    await deleteDoc(doc(db, ...BASE_PATH, "broadcast_meta", `presence-${clientId}`));
+  } catch {
+    // Best effort; the worker prunes stale presence docs
   }
 }
 

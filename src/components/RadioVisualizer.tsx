@@ -2,7 +2,7 @@ import React, { useEffect, useRef } from "react";
 
 interface RadioVisualizerProps {
   analyser: AnalyserNode | null;
-  speaker: "Aoede" | "Charon" | null;
+  speaker: string | null;
   isPlaying: boolean;
 }
 
@@ -46,13 +46,10 @@ export const RadioVisualizer: React.FC<RadioVisualizerProps> = ({
       // Determine colors based on active speaker
       let primaryColor = "#a855f7"; // purple for BGM only
       let secondaryColor = "#6366f1"; // indigo
-      
-      if (speaker === "Aoede") {
-        primaryColor = "#ec4899"; // pink (Aoede - Female)
-        secondaryColor = "#f43f5e"; // rose
-      } else if (speaker === "Charon") {
-        primaryColor = "#06b6d4"; // cyan (Charon - Male)
-        secondaryColor = "#3b82f6"; // blue
+
+      if (speaker) {
+        primaryColor = "#a3e635"; // zunda green while ずんだもん is talking
+        secondaryColor = "#22c55e";
       }
 
       // Draw equalizer bars
@@ -91,10 +88,10 @@ export const RadioVisualizer: React.FC<RadioVisualizerProps> = ({
       ctx.stroke();
 
       if (isPlaying && speaker) {
-        ctx.strokeStyle = speaker === "Aoede" ? "rgba(236, 72, 153, 0.2)" : "rgba(6, 182, 212, 0.2)";
+        ctx.strokeStyle = "rgba(163, 230, 53, 0.2)";
         ctx.lineWidth = 2;
         ctx.shadowBlur = 15;
-        ctx.shadowColor = speaker === "Aoede" ? "#ec4899" : "#06b6d4";
+        ctx.shadowColor = "#a3e635";
         ctx.beginPath();
         
         // Pulsing circle
