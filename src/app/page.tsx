@@ -4,6 +4,18 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { collection, query, where, getDocs, updateDoc, doc, limit, addDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { getAudioEngine, ScriptSegment } from "@/lib/audioEngine";
+import {
+  acquireLeadership,
+  releaseLeadership,
+  getRunwayEndMs,
+  publishProgram,
+  subscribeToBroadcast,
+  cleanupExpiredSegments,
+  getRecentNewsHeadlines,
+  claimNews,
+  withTimeout,
+  PublishItem,
+} from "@/lib/broadcastBus";
 import { RadioVisualizer } from "@/components/RadioVisualizer";
 import { ChatBox } from "@/components/ChatBox";
 import { LetterModal } from "@/components/LetterModal";
@@ -17,6 +29,13 @@ interface Letter {
   sender?: string;
   content?: string;
 }
+
+// Producer pacing
+const RUNWAY_THRESHOLD_MS = 45_000; // generate the next corner when less air time than this remains
+const GEN_RETRY_MS = 15_000; // minimum interval between generation attempts
+const NEWS_CHECK_INTERVAL_MS = 10 * 60_000; // breaking-news check cadence
+const CLEANUP_INTERVAL_MS = 60_000; // expired-segment cleanup cadence
+const PRODUCER_TICK_MS = 5_000;
 
 const BACKUP_SCRIPTS: { segments: ScriptSegment[] }[] = [
   {
@@ -46,27 +65,56 @@ const BACKUP_SCRIPTS: { segments: ScriptSegment[] }[] = [
   }
 ];
 
+const newClientId = () =>
+  typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `client-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
+
 export default function Home() {
   const [isPlaying, setIsPlaying] = useState(false);
   // The engine singleton is created lazily; AudioContext init happens on user gesture in start()
   const [audioEngine] = useState(() => getAudioEngine());
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
-  
+  const [clientId] = useState(newClientId);
+
   // UI states
   const [currentSegment, setCurrentSegment] = useState<ScriptSegment | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isLeader, setIsLeader] = useState(false);
   const [isLetterModalOpen, setIsLetterModalOpen] = useState(false);
   const [statusMessage, setStatusMessage] = useState("放送はスタンバイ状態です。開始ボタンを押してください。");
   const [letterCount, setLetterCount] = useState(0);
 
   // Background state to prevent overlapping script generations
   const isGeneratingRef = useRef(false);
-  // Holds the latest generator so the retry timer can call it without self-reference
-  const retryGenerateRef = useRef<(() => void) | null>(null);
   // Ensures the fallback announcement is posted to chat only once per failure streak
   const fallbackAnnouncedRef = useRef(false);
+  // Producer pacing timestamps
+  const lastGenAttemptRef = useRef(0);
+  const lastNewsCheckRef = useRef(0);
+  const lastCleanupRef = useRef(0);
 
-  const generateAndQueueNext = useCallback(async () => {
+  // Generates TTS audio for each segment sequentially to avoid Gemini quota spikes
+  const synthesizeSegments = useCallback(async (segments: ScriptSegment[]): Promise<PublishItem[]> => {
+    const items: PublishItem[] = [];
+    for (const segment of segments) {
+      const ttsResponse = await fetch("/api/radio-tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: segment.text, speaker: segment.speaker }),
+      });
+      if (!ttsResponse.ok) {
+        throw new Error(`TTS generation failed for ${segment.speaker}`);
+      }
+      const ttsData = await ttsResponse.json();
+      items.push({ segment, audioBase64: ttsData.audioContent as string });
+    }
+    return items;
+  }, []);
+
+  // Producer duty: generate the next regular corner (news + letters) and
+  // publish it to the shared timeline that every listener plays.
+  const produceNextCorner = useCallback(async () => {
     if (!audioEngine || isGeneratingRef.current) return;
     isGeneratingRef.current = true;
     setIsLoading(true);
@@ -75,16 +123,17 @@ export default function Home() {
       // 1. Fetch unread letters from Firestore
       const lettersRef = collection(db, "artifacts", "ai-radio-default", "public", "data", "letters");
       const q = query(lettersRef, where("used", "==", false), limit(3));
-      const querySnapshot = await getDocs(q);
-      
+      const querySnapshot = await withTimeout(getDocs(q), 8_000, "letters");
+
       const letters: Letter[] = [];
       const letterDocIds: string[] = [];
-      querySnapshot.forEach((doc) => {
-        letters.push({ id: doc.id, ...doc.data() });
-        letterDocIds.push(doc.id);
+      querySnapshot.forEach((docSnap) => {
+        letters.push({ id: docSnap.id, ...docSnap.data() });
+        letterDocIds.push(docSnap.id);
       });
 
-      // 2. Request new script script
+      // 2. Generate the script (Gemini + Google Search, letters answered live)
+      setStatusMessage("次のコーナーの台本を生成しています...");
       const scriptResponse = await fetch("/api/radio-script", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -102,16 +151,33 @@ export default function Home() {
         throw new Error("No segments generated in script");
       }
 
-      // Mark letters as used so they are not repeated
-      await Promise.all(
-        letterDocIds.map((id) => 
-          updateDoc(doc(db, "artifacts", "ai-radio-default", "public", "data", "letters", id), { used: true })
-        )
-      );
-      setLetterCount(0);
+      // 3. Synthesize all audio first; letters are only consumed once their
+      // answers are actually ready to air
+      const items = await synthesizeSegments(segments);
+
+      try {
+        await withTimeout(
+          Promise.all(
+            letterDocIds.map((id) =>
+              updateDoc(doc(db, "artifacts", "ai-radio-default", "public", "data", "letters", id), { used: true })
+            )
+          ),
+          8_000,
+          "mark-letters"
+        );
+        setLetterCount(0);
+      } catch (markErr) {
+        console.error("Failed to mark letters as used (they may repeat):", markErr);
+      }
+
+      // 4. Publish to the shared timeline
+      const runwayEnd = await withTimeout(getRunwayEndMs(), 8_000, "runway");
+      const startAt = Math.max(Date.now() + 2_000, runwayEnd);
+      await withTimeout(publishProgram(items, startAt), 30_000, "publish");
+
+      fallbackAnnouncedRef.current = false;
 
       // Post system announcement to Firestore chats (best-effort; never block the broadcast pipeline)
-      fallbackAnnouncedRef.current = false;
       const chatsRef = collection(db, "artifacts", "ai-radio-default", "public", "data", "chats");
       addDoc(chatsRef, {
         user: "System",
@@ -122,40 +188,15 @@ export default function Home() {
         console.error("Failed to post system announcement to chat:", chatErr);
       });
 
-      // 3. Generate TTS audio sequentially to avoid Gemini quota spikes
-      const ttsResults = [];
-      for (const segment of segments) {
-        const ttsResponse = await fetch("/api/radio-tts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: segment.text, speaker: segment.speaker }),
-        });
-
-        if (!ttsResponse.ok) {
-          throw new Error(`TTS generation failed for ${segment.speaker}`);
-        }
-
-        const ttsData = await ttsResponse.json();
-        ttsResults.push({
-          segment,
-          audioContent: ttsData.audioContent as string,
-        });
-      }
-
-      // 4. Queue everything to the audio engine
-      ttsResults.forEach((result) => {
-        audioEngine.queueSegment(result.segment, result.audioContent);
-      });
-
-      setStatusMessage("新しい台本と音声をロードしました。順次放送します。");
+      setStatusMessage("新しいコーナーを放送キューに送出しました。");
     } catch (error) {
       console.error("Error in broadcasting sequence, falling back to backup script:", error);
       setStatusMessage(`一時的な通信エラーのため、バックアップ台本でお送りしています。`);
-      
+
       try {
         // Fallback to random backup script
         const randomBackup = BACKUP_SCRIPTS[Math.floor(Math.random() * BACKUP_SCRIPTS.length)];
-        const backupSegments = randomBackup.segments;
+        const items = await synthesizeSegments(randomBackup.segments);
 
         // Post system announcement about fallback (best-effort, once per failure streak)
         if (!fallbackAnnouncedRef.current) {
@@ -171,49 +212,142 @@ export default function Home() {
           });
         }
 
-        // Generate TTS audio sequentially to avoid Gemini quota spikes
-        const ttsResults = [];
-        for (const segment of backupSegments) {
-          const ttsResponse = await fetch("/api/radio-tts", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text: segment.text, speaker: segment.speaker }),
-          });
-
-          if (!ttsResponse.ok) {
-            throw new Error(`TTS generation failed for backup ${segment.speaker}`);
-          }
-
-          const ttsData = await ttsResponse.json();
-          ttsResults.push({
-            segment,
-            audioContent: ttsData.audioContent as string,
-          });
+        try {
+          const runwayEnd = await withTimeout(getRunwayEndMs(), 8_000, "runway");
+          const startAt = Math.max(Date.now() + 2_000, runwayEnd);
+          await withTimeout(publishProgram(items, startAt), 30_000, "publish");
+          setStatusMessage("バックアップ台本を放送キューに送出しました。");
+        } catch (publishErr) {
+          // Firestore unreachable: keep at least this client's broadcast alive locally
+          console.error("Publish failed; playing backup script locally only:", publishErr);
+          items.forEach(({ segment, audioBase64 }) => audioEngine.queueSegment(segment, audioBase64));
+          setStatusMessage("バックアップ台本をローカル再生でお送りしています。");
         }
-
-        ttsResults.forEach((result) => {
-          audioEngine.queueSegment(result.segment, result.audioContent);
-        });
-
-        setStatusMessage("バックアップ台本と音声をロードしました。順次放送します。");
       } catch (fallbackErr) {
         console.error("Critical error: Fallback script also failed.", fallbackErr);
-        setStatusMessage(`完全なシステムエラーが発生しました。5秒後に再試行します。`);
-
-        // Final fallback retry after delay; read live engine state to avoid a stale isPlaying closure
-        setTimeout(() => {
-          if (audioEngine.isPlaying) retryGenerateRef.current?.();
-        }, 5000);
+        setStatusMessage(`完全なシステムエラーが発生しました。自動で再試行します。`);
+        // The producer tick keeps retrying while the runway is empty
       }
     } finally {
       setIsLoading(false);
       isGeneratingRef.current = false;
     }
-  }, [audioEngine]);
+  }, [audioEngine, synthesizeSegments]);
 
+  // Producer duty: look for major AI news and, if found, cut into the
+  // broadcast with a bulletin
+  const checkBreakingNews = useCallback(async () => {
+    try {
+      const seenHeadlines = await withTimeout(getRecentNewsHeadlines(), 8_000, "news-history");
+      const newsResponse = await fetch("/api/breaking-news", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ seenHeadlines }),
+      });
+      if (!newsResponse.ok) return;
+
+      const news = await newsResponse.json();
+      if (!news.hasBreaking || !news.id || !news.headline) return;
+
+      // Generate and synthesize the bulletin before claiming the slug, so a
+      // failed generation doesn't permanently swallow the news
+      const scriptResponse = await fetch("/api/radio-script", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ breaking: { headline: news.headline, summary: news.summary } }),
+      });
+      if (!scriptResponse.ok) return;
+
+      const scriptData = await scriptResponse.json();
+      const segments: ScriptSegment[] = scriptData.segments || [];
+      if (segments.length === 0) return;
+
+      const items = await synthesizeSegments(segments);
+
+      const slug = String(news.id).toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 80) || `news-${Date.now()}`;
+      const isNew = await withTimeout(claimNews(slug, news.headline), 8_000, "news-claim");
+      if (!isNew) return;
+
+      const runwayEnd = await withTimeout(getRunwayEndMs(), 8_000, "runway");
+      const startAt = Math.max(Date.now() + 2_000, runwayEnd);
+      await withTimeout(publishProgram(items, startAt, { isBreaking: true }), 30_000, "publish-bulletin");
+
+      const chatsRef = collection(db, "artifacts", "ai-radio-default", "public", "data", "chats");
+      addDoc(chatsRef, {
+        user: "System",
+        text: `🚨 ニュース速報: ${news.headline}`,
+        createdAt: Date.now(),
+        isSystem: true,
+      }).catch(() => {
+        // Chat announcement is best-effort; ignore failures
+      });
+    } catch (error) {
+      console.error("Breaking news check failed:", error);
+    }
+  }, [synthesizeSegments]);
+
+  // Producer loop: elect a leader among playing clients; the leader keeps the
+  // shared timeline filled and watches for breaking news
   useEffect(() => {
-    retryGenerateRef.current = generateAndQueueNext;
-  }, [generateAndQueueNext]);
+    if (!isPlaying || !audioEngine) return;
+
+    let cancelled = false;
+
+    const tick = async () => {
+      try {
+        const leading = await withTimeout(acquireLeadership(clientId), 8_000, "election");
+        if (cancelled) return;
+        setIsLeader(leading);
+        if (!leading) return;
+
+        const now = Date.now();
+
+        if (now - lastCleanupRef.current > CLEANUP_INTERVAL_MS) {
+          lastCleanupRef.current = now;
+          cleanupExpiredSegments().catch(() => {
+            // Housekeeping is best-effort
+          });
+        }
+
+        const runwayEnd = await withTimeout(getRunwayEndMs(), 8_000, "runway");
+        if (
+          runwayEnd - Date.now() < RUNWAY_THRESHOLD_MS &&
+          now - lastGenAttemptRef.current > GEN_RETRY_MS &&
+          !isGeneratingRef.current
+        ) {
+          lastGenAttemptRef.current = now;
+          await produceNextCorner();
+        }
+
+        if (Date.now() - lastNewsCheckRef.current > NEWS_CHECK_INTERVAL_MS) {
+          lastNewsCheckRef.current = Date.now();
+          await checkBreakingNews();
+        }
+      } catch (error) {
+        console.error("Producer tick failed:", error);
+      }
+    };
+
+    tick();
+    const interval = setInterval(tick, PRODUCER_TICK_MS);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+      setIsLeader(false);
+      releaseLeadership(clientId);
+    };
+  }, [isPlaying, audioEngine, clientId, produceNextCorner, checkBreakingNews]);
+
+  // Consumer loop: every playing client (producer included) receives the
+  // shared timeline and schedules segments at their absolute air times
+  useEffect(() => {
+    if (!isPlaying || !audioEngine) return;
+    const unsubscribe = subscribeToBroadcast((segment, audioBase64) => {
+      audioEngine.scheduleSegmentAt(segment, audioBase64, segment.airAt);
+    });
+    return () => unsubscribe();
+  }, [isPlaying, audioEngine]);
 
   useEffect(() => {
     if (audioEngine) {
@@ -221,16 +355,19 @@ export default function Home() {
       audioEngine.setCallbacks(
         (segment) => {
           setCurrentSegment(segment);
-          setStatusMessage(`${segment.speaker} がお話し中 (${segment.emotion})`);
+          setStatusMessage(
+            segment.isBreaking
+              ? "🚨 ニュース速報をお伝えしています"
+              : `${segment.speaker} がお話し中 (${segment.emotion})`
+          );
         },
         () => {
           setCurrentSegment(null);
           setStatusMessage("BGM演奏中...");
         },
         () => {
-          // Trigger automatic next segment generation when queue runs empty
-          setStatusMessage("次のニュース台本を読み込んでいます...");
-          generateAndQueueNext();
+          // Queue-empty events are unused in shared-broadcast mode; the
+          // producer loop keeps the timeline filled
         }
       );
     }
@@ -250,7 +387,7 @@ export default function Home() {
     checkUnreadLetters();
     const interval = setInterval(checkUnreadLetters, 10000); // Check every 10s
     return () => clearInterval(interval);
-  }, [audioEngine, generateAndQueueNext]);
+  }, [audioEngine]);
 
   const handleStartBroadcast = () => {
     if (!audioEngine) return;
@@ -266,10 +403,7 @@ export default function Home() {
       audioEngine.start();
       setAnalyser(audioEngine.analyser);
       setIsPlaying(true);
-      setStatusMessage("放送開始... BGM演奏中");
-
-      // Auto trigger first script generation if queue is empty
-      generateAndQueueNext();
+      setStatusMessage("放送に接続しています... 番組表を同期中");
     }
   };
 
@@ -315,20 +449,25 @@ export default function Home() {
 
       {/* Main Content Area */}
       <div className="flex-1 max-w-7xl w-full mx-auto p-4 md:p-6 grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
-        
+
         {/* Left 2 Columns: On-Air Status, Visualizer, Subtitles */}
         <div className="lg:col-span-2 space-y-6">
-          
+
           {/* Main On-Air Console */}
           <div className="bg-slate-900/40 border border-slate-900 rounded-3xl p-6 backdrop-blur-md shadow-2xl relative overflow-hidden">
             <div className="absolute top-0 right-0 w-32 h-32 bg-indigo-500/5 rounded-full blur-2xl pointer-events-none" />
-            
+
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-6">
               <div className="space-y-1.5">
                 <div className="flex items-center space-x-2">
                   <span className="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-2 py-0.5 rounded-full font-bold">
                     SYSTEM STATUS
                   </span>
+                  {isLeader && (
+                    <span className="text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full font-bold">
+                      BROADCAST PRODUCER
+                    </span>
+                  )}
                   {isLoading && (
                     <span className="text-[10px] bg-purple-500/10 text-purple-400 border border-purple-500/20 px-2 py-0.5 rounded-full font-bold flex items-center space-x-1">
                       <Loader2 className="w-2.5 h-2.5 animate-spin" />
@@ -372,15 +511,17 @@ export default function Home() {
             />
 
             {/* Live Subtitles & Speaker indicator */}
-            <div className="mt-6 bg-slate-950/60 border border-slate-900 rounded-2xl p-6 min-h-[140px] flex flex-col justify-between relative">
-              
+            <div className={`mt-6 bg-slate-950/60 border rounded-2xl p-6 min-h-[140px] flex flex-col justify-between relative ${
+              currentSegment?.isBreaking ? "border-rose-500/40" : "border-slate-900"
+            }`}>
+
               {currentSegment ? (
                 <>
                   {/* Speaker Label */}
                   <div className="flex items-center space-x-2.5 mb-3">
                     <div className={`w-2.5 h-2.5 rounded-full ${
-                      currentSegment.speaker === "Aoede" 
-                        ? "bg-pink-500 shadow-[0_0_8px_#ec4899]" 
+                      currentSegment.speaker === "Aoede"
+                        ? "bg-pink-500 shadow-[0_0_8px_#ec4899]"
                         : "bg-cyan-400 shadow-[0_0_8px_#22d3ee]"
                     }`} />
                     <span className={`text-xs font-bold ${
@@ -391,6 +532,11 @@ export default function Home() {
                     <span className="text-[10px] text-slate-500 font-medium">
                       emotion: {currentSegment.emotion}
                     </span>
+                    {currentSegment.isBreaking && (
+                      <span className="text-[10px] bg-rose-500/10 text-rose-400 border border-rose-500/30 px-2 py-0.5 rounded-full font-bold animate-pulse">
+                        🚨 ニュース速報
+                      </span>
+                    )}
                   </div>
 
                   {/* Script Text */}
@@ -414,7 +560,7 @@ export default function Home() {
                   <Sparkles className="w-3 h-3 text-indigo-400" />
                   <span>Powered by Gemini 2.5 Flash & Search Grounding</span>
                 </div>
-                <span>ローカルLo-FiシンセサイザーBGM自動同調中</span>
+                <span>全リスナー同時放送 / ローカルLo-Fiシンセサイザー</span>
               </div>
             </div>
           </div>
@@ -426,9 +572,9 @@ export default function Home() {
                 <Sparkles className="w-4 h-4" />
               </div>
               <div className="space-y-1">
-                <h4 className="text-xs font-semibold text-slate-300">AIによるリアルタイム対話台本</h4>
+                <h4 className="text-xs font-semibold text-slate-300">リアルタイム生成のAI対話番組</h4>
                 <p className="text-[11px] text-slate-400 leading-relaxed">
-                  Google Searchを利用して、最新のITやテックトレンドニュースを収集し、AoedeとCharonの二人の対話台本を毎回完全に新規生成します。
+                  Google Searchで最新のAI・テックニュースを収集して対話台本を生成。OpenAIの新モデル発表など重大ニュースは「ニュース速報」として番組に割り込みます。お便りへの回答も検索で裏取りした上で、全リスナーに同じ放送として届きます。
                 </p>
               </div>
             </div>
@@ -444,6 +590,7 @@ export default function Home() {
                 </p>
               </div>
             </div>
+
           </div>
 
         </div>

@@ -5,6 +5,7 @@ export interface ScriptSegment {
   speaker: "Aoede" | "Charon";
   text: string;
   emotion: string;
+  isBreaking?: boolean;
 }
 
 export class AudioEngine {
@@ -28,6 +29,8 @@ export class AudioEngine {
   // TTS Queue
   private ttsQueue: { segment: ScriptSegment; buffer: AudioBuffer }[] = [];
   private currentTtsSource: AudioBufferSourceNode | null = null;
+  // Sources scheduled at absolute wall-clock times (shared broadcast mode)
+  private scheduledSources: Map<AudioBufferSourceNode, ReturnType<typeof setTimeout>> = new Map();
   private onSegmentStart: ((segment: ScriptSegment) => void) | null = null;
   private onSegmentEnd: (() => void) | null = null;
   private onQueueEmpty: (() => void) | null = null;
@@ -354,6 +357,72 @@ export class AudioEngine {
     }
   }
 
+  // Schedules a segment to start at an absolute wall-clock time (epoch ms).
+  // Late joiners start mid-segment at the correct offset, so every listener
+  // hears the same audio at the same moment. Returns false if the segment has
+  // already finished airing.
+  scheduleSegmentAt(segment: ScriptSegment, base64Audio: string, airAtMs: number): boolean {
+    if (!this.ctx || !this.ttsGain) return false;
+
+    const buffer = this.decodePcm16(base64Audio);
+    const nowMs = Date.now();
+    const durationMs = (buffer.length / buffer.sampleRate) * 1000;
+    if (airAtMs + durationMs <= nowMs + 250) return false;
+
+    const offsetSec = Math.max(0, (nowMs - airAtMs) / 1000);
+    const delaySec = Math.max(0, (airAtMs - nowMs) / 1000);
+    const when = this.ctx.currentTime + delaySec;
+
+    const source = this.ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(this.ttsGain);
+
+    // Attention chime just before a breaking-news bulletin goes on air
+    if (segment.isBreaking && delaySec > 1.8) {
+      this.playBreakingJingle(when - 1.6);
+    }
+
+    const startTimer = setTimeout(() => {
+      this.duckBgm(true);
+      if (this.onSegmentStart) this.onSegmentStart(segment);
+    }, delaySec * 1000);
+
+    source.onended = () => {
+      const timer = this.scheduledSources.get(source);
+      if (timer !== undefined) clearTimeout(timer);
+      this.scheduledSources.delete(source);
+      this.duckBgm(false);
+      if (this.onSegmentEnd) this.onSegmentEnd();
+    };
+
+    this.scheduledSources.set(source, startTimer);
+    source.start(when, offsetSec);
+    return true;
+  }
+
+  private playBreakingJingle(when: number) {
+    if (!this.ctx) return;
+    const startAt = Math.max(when, this.ctx.currentTime);
+    // Two short attention tones followed by a longer high tone
+    const tones = [
+      { freq: 880, at: 0, dur: 0.15 },
+      { freq: 880, at: 0.22, dur: 0.15 },
+      { freq: 1318.5, at: 0.44, dur: 0.7 },
+    ];
+    for (const { freq, at, dur } of tones) {
+      const osc = this.ctx.createOscillator();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(freq, startAt + at);
+      const gain = this.ctx.createGain();
+      gain.gain.setValueAtTime(0.07, startAt + at);
+      gain.gain.exponentialRampToValueAtTime(0.0001, startAt + at + dur);
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(startAt + at);
+      osc.stop(startAt + at + dur);
+    }
+  }
+
   // Decodes raw PCM16 (Little Endian, 24000Hz) Base64 into Web Audio AudioBuffer
   private decodePcm16(base64: string, sampleRate: number = 24000): AudioBuffer {
     if (!this.ctx) throw new Error("AudioContext is not initialized");
@@ -430,6 +499,16 @@ export class AudioEngine {
       }
       this.currentTtsSource = null;
     }
+    this.scheduledSources.forEach((timer, source) => {
+      clearTimeout(timer);
+      source.onended = null;
+      try {
+        source.stop();
+      } catch {
+        // Source may already be stopped; nothing to clean up
+      }
+    });
+    this.scheduledSources.clear();
     this.ttsQueue = [];
     this.duckBgm(false);
   }

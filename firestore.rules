@@ -8,5 +8,17 @@ service cloud.firestore {
     match /artifacts/ai-radio-default/public/data/chats/{document} {
       allow read, write: if true; // Allows open live chat reading and writing
     }
+    // Shared broadcast timeline (segments + audio chunks subcollections)
+    match /artifacts/ai-radio-default/public/data/broadcast/{document=**} {
+      allow read, write: if true;
+    }
+    // Producer lease for leader election
+    match /artifacts/ai-radio-default/public/data/broadcast_meta/{document} {
+      allow read, write: if true;
+    }
+    // Breaking-news dedupe records
+    match /artifacts/ai-radio-default/public/data/broadcast_news/{document} {
+      allow read, write: if true;
+    }
   }
 }

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { parseGeminiJson } from "@/lib/parseGeminiJson";
 
 const FALLBACK_SCRIPT = {
   segments: [
@@ -25,24 +26,11 @@ const FALLBACK_SCRIPT = {
   ],
 };
 
-function parseScriptJson(text: string) {
-  const trimmed = text.trim();
-  const fencedJson = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-  const candidate = fencedJson?.[1] ?? trimmed;
-  const firstBrace = candidate.indexOf("{");
-  const lastBrace = candidate.lastIndexOf("}");
-
-  if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
-    throw new Error("Gemini response did not contain a JSON object");
-  }
-
-  return JSON.parse(candidate.slice(firstBrace, lastBrace + 1));
-}
-
 export async function POST(req: Request) {
   try {
-    const { letters } = (await req.json()) as {
+    const { letters, breaking } = (await req.json()) as {
       letters?: { sender?: string; content?: string }[];
+      breaking?: { headline?: string; summary?: string };
     };
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
@@ -54,7 +42,30 @@ export async function POST(req: Request) {
       ? letters.map((l) => `[差出人: ${l.sender}] ${l.content}`).join("\n")
       : "本日のお便りはまだ届いていません。";
 
-    const systemInstruction = `
+    const bulletinInstruction = `
+あなたはラジオ番組「えーあいらじお（AI Radio）」のニュース速報担当です。
+通常放送の途中に割り込みで挿入される「ニュース速報」コーナーの台本を生成してください。
+
+速報するニュース:
+見出し: ${breaking?.headline ?? ""}
+概要: ${breaking?.summary ?? ""}
+
+登場人物:
+1. Aoede (アオイデ - 女性パーソナリティ): 明るく知性的。
+2. Charon (カロン - 男性パーソナリティ): 落ち着いたトーン、技術解説が得意。
+
+速報の構成ルール:
+- Google Searchでこのニュースの詳細・背景を確認し、正確な情報のみ伝えてください。
+- 最初のセグメントはCharonが「番組の途中ですが、ここでニュース速報です。」と切り出します。
+- 2〜4セグメントで要点を簡潔に伝え、Aoedeが感想や補足を一言添えます。
+- 最後は「以上、ニュース速報でした。引き続きえーあいらじおをお楽しみください。」のように締めて通常放送に戻します。
+- 応答はJSONオブジェクトのみを返してください。Markdownや説明文は不要です。
+- JSON形式は {"segments":[{"speaker":"Aoede","text":"...","emotion":"happy"}]} です。
+- speaker は "Aoede" または "Charon" のみです。
+- emotion は "happy", "calm", "excited", "sad" のいずれかです。
+`;
+
+    const regularInstruction = `
 あなたはラジオ番組「えーあいらじお（AI Radio）」の構成作家およびパーソナリティです。
 最新の時事ニュース（IT、テクノロジー、カルチャー、トレンドなど）をWeb検索して1〜2個ピックアップし、さらにリスナーから届いたお便りを紹介する、テンポの良いラジオの対話台本を生成してください。
 
@@ -65,6 +76,7 @@ export async function POST(req: Request) {
 台本の構成ルール：
 - 最初は短いオープニングトークから入り、最新ニュースを1つか2つ紹介し、解説や議論を行います。
 - その後、届いたお便り（以下に記載）を最低1つ読み上げ、それに対して二人が感想やアドバイスを語り合います。
+- お便りに質問や話題が含まれる場合は、Google Searchでリアルタイムに最新情報を調べ、事実に基づいて具体的に答えてください。憶測で答えてはいけません。
 - 最後にエンディングトークで締めます。
 - 対話は自然で、相槌や軽い雑談を交え、リスナーを退屈させないようにしてください。
 - 応答はJSONオブジェクトのみを返してください。Markdownや説明文は不要です。
@@ -76,7 +88,10 @@ export async function POST(req: Request) {
 ${lettersText}
 `;
 
-    const prompt = "最新のテクノロジーニュースを検索して取り入れつつ、お便りにも答える面白いラジオ台本（4セグメント程度）を作ってください。";
+    const systemInstruction = breaking ? bulletinInstruction : regularInstruction;
+    const prompt = breaking
+      ? "このニュースを検索で確認し、ラジオのニュース速報台本（2〜4セグメント）をJSONで作ってください。"
+      : "最新のテクノロジーニュースを検索して取り入れつつ、お便りにも答える面白いラジオ台本（4セグメント程度）を作ってください。";
 
     let response: Response | null = null;
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -107,14 +122,19 @@ ${lettersText}
       await new Promise((resolve) => setTimeout(resolve, 1200 * (attempt + 1)));
     }
 
+    // On quota pressure: regular corners fall back to a canned script, but a
+    // bulletin must never air canned content — return no segments instead so
+    // the producer skips this bulletin and the news stays unclaimed.
+    const quotaFallback = breaking ? { segments: [] } : FALLBACK_SCRIPT;
+
     if (!response) {
-      return NextResponse.json(FALLBACK_SCRIPT);
+      return NextResponse.json(quotaFallback);
     }
 
     if (!response.ok) {
       const errorText = await response.text();
       if ([429, 503].includes(response.status)) {
-        return NextResponse.json(FALLBACK_SCRIPT);
+        return NextResponse.json(quotaFallback);
       }
       return NextResponse.json({ error: `Gemini API Error: ${errorText}` }, { status: response.status });
     }
@@ -125,7 +145,7 @@ ${lettersText}
       return NextResponse.json({ error: "Failed to parse script from Gemini response" }, { status: 500 });
     }
 
-    const scriptJson = parseScriptJson(scriptText);
+    const scriptJson = parseGeminiJson(scriptText);
     if (!Array.isArray(scriptJson.segments)) {
       return NextResponse.json({ error: "Gemini response did not include segments" }, { status: 500 });
     }
