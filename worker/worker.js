@@ -431,12 +431,6 @@ let wasIdle = true;
 
 async function tick() {
   try {
-    const leading = await withTimeout(acquireLeadership(), 8_000, "election");
-    if (!leading) {
-      log("Another priority worker holds the lease; standing by");
-      return;
-    }
-
     const now = Date.now();
 
     if (now - lastCleanup > CLEANUP_INTERVAL_MS) {
@@ -445,15 +439,24 @@ async function tick() {
       cleanupStalePresence().catch(() => {});
     }
 
+    // Check presence BEFORE touching the lease: while nobody is listening the
+    // worker must not hold leadership, so browser-side election (including
+    // clients running older builds without presence heartbeats) keeps working
     const listeners = await withTimeout(countActiveListeners(), 8_000, "presence");
     if (listeners === 0) {
-      if (!wasIdle) log("No listeners; pausing generation");
+      if (!wasIdle) log("No listeners; pausing generation and letting the lease lapse");
       wasIdle = true;
       return;
     }
     if (wasIdle) {
       log(`Listeners detected (${listeners}); resuming generation`);
       wasIdle = false;
+    }
+
+    const leading = await withTimeout(acquireLeadership(), 8_000, "election");
+    if (!leading) {
+      log("Another priority worker holds the lease; standing by");
+      return;
     }
 
     const runwayEnd = await withTimeout(getRunwayEndMs(), 8_000, "runway");
