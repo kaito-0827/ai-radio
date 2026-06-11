@@ -10,6 +10,7 @@ import {
   collection,
   deleteDoc,
   doc,
+  getDoc,
   getDocs,
   limit,
   onSnapshot,
@@ -77,6 +78,22 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): 
 // Writes only when claiming or when the lease is past half-life, so the
 // election costs roughly one Firestore write per ~20s instead of per tick.
 export async function acquireLeadership(clientId: string): Promise<boolean> {
+  const current = await getDoc(leaderDoc());
+  const currentData = current.data();
+  const currentNow = Date.now();
+  const currentLeaseUntil = currentData?.leaseUntil ?? 0;
+
+  if (current.exists() && currentData?.clientId !== clientId && currentLeaseUntil >= currentNow) {
+    return false;
+  }
+  if (
+    current.exists() &&
+    currentData?.clientId === clientId &&
+    currentLeaseUntil - currentNow >= LEASE_MS / 2
+  ) {
+    return true;
+  }
+
   return runTransaction(db, async (tx) => {
     const snap = await tx.get(leaderDoc());
     const data = snap.data();
