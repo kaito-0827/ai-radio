@@ -35,7 +35,7 @@ interface Letter {
 }
 
 // Producer pacing
-const RUNWAY_THRESHOLD_MS = 45_000; // generate the next corner when less air time than this remains
+const RUNWAY_THRESHOLD_MS = 90_000; // generate ahead so corners join without dead air
 const GEN_RETRY_MS = 15_000; // minimum interval between generation attempts
 const NEWS_CHECK_INTERVAL_MS = 10 * 60_000; // breaking-news check cadence
 const CLEANUP_INTERVAL_MS = 60_000; // expired-segment cleanup cadence

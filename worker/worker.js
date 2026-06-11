@@ -74,7 +74,7 @@ const LEASE_MS = 45_000;
 const CHUNK_CHARS = 700_000;
 const SEGMENT_GAP_MS = 700;
 const PCM_BYTES_PER_MS = 48;
-const RUNWAY_THRESHOLD_MS = 45_000;
+const RUNWAY_THRESHOLD_MS = 90_000; // generate ahead so corners join without dead air
 const GEN_RETRY_MS = 15_000;
 const NEWS_CHECK_INTERVAL_MS = 10 * 60_000;
 const CLEANUP_INTERVAL_MS = 60_000;
@@ -84,6 +84,17 @@ const ANNOUNCE_INTERVAL_MS = 5 * 60_000;
 
 // VOICEVOX style IDs for ずんだもん
 const ZUNDAMON_STYLE_BY_EMOTION = { happy: 1, calm: 3, excited: 7, sad: 22 };
+
+// Short station-call lines aired the moment a listener tunes in to an empty
+// timeline, so the radio starts talking within seconds while the first real
+// corner is still being generated.
+const STATION_FILLERS = [
+  { speaker: "ずんだもん", text: "えーあいらじお、オンエア中なのだ！ここからはボク、ずんだもんがお届けするのだ。", emotion: "happy" },
+  { speaker: "ずんだもん", text: "ようこそなのだ！いま、いちばんホットなエーアイニュースを集めているところなのだ。", emotion: "excited" },
+  { speaker: "ずんだもん", text: "最新ニュースとお便りの準備中なのだ。少しの間、ゆったりBGMでまったりしてほしいのだ。", emotion: "calm" },
+  { speaker: "ずんだもん", text: "このらじおは、ボクがリアルタイムで台本を作ってしゃべる、世界にひとつの生放送なのだ！", emotion: "happy" },
+  { speaker: "ずんだもん", text: "お便りもチャットも大歓迎なのだ。画面のボタンから気軽に送ってほしいのだ！", emotion: "excited" },
+];
 
 const BACKUP_SCRIPTS = [
   {
@@ -371,6 +382,18 @@ async function produceNextCorner() {
   log(`Published corner: ${items.length} segments, letters=${letters.length}, degraded=${scriptDegraded}`);
 }
 
+// Airs a couple of station-call lines right away when a listener tunes in to
+// an empty timeline, covering the wait while the first corner is generated
+async function publishStationFiller() {
+  const runwayEnd = await withTimeout(getRunwayEndMs(), 8_000, "runway");
+  if (runwayEnd > Date.now() + 5_000) return; // something is already on air
+
+  const fillers = [...STATION_FILLERS].sort(() => Math.random() - 0.5).slice(0, 3);
+  const items = await synthesizeSegments(fillers);
+  await withTimeout(publishProgram(items, Date.now() + 1_500), 30_000, "publish-filler");
+  log("Published station filler while the first corner is generated");
+}
+
 async function produceBackupCorner() {
   const backup = BACKUP_SCRIPTS[Math.floor(Math.random() * BACKUP_SCRIPTS.length)];
   const items = await synthesizeSegments(backup.segments);
@@ -448,6 +471,7 @@ async function tick() {
       wasIdle = true;
       return;
     }
+    const resumed = wasIdle;
     if (wasIdle) {
       log(`Listeners detected (${listeners}); resuming generation`);
       wasIdle = false;
@@ -457,6 +481,11 @@ async function tick() {
     if (!leading) {
       log("Another priority worker holds the lease; standing by");
       return;
+    }
+
+    // First listener after an idle period: get a voice on air within seconds
+    if (resumed) {
+      await publishStationFiller().catch((e) => logError("Station filler failed:", e.message));
     }
 
     const runwayEnd = await withTimeout(getRunwayEndMs(), 8_000, "runway");
