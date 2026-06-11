@@ -345,8 +345,14 @@ async function produceNextCorner() {
   if (!scriptRes.ok) throw new Error(`radio-script failed: ${scriptRes.status}`);
   const scriptData = await scriptRes.json();
   const scriptDegraded = Boolean(scriptData.degraded);
-  const segments = scriptData.segments || [];
+  let segments = scriptData.segments || [];
   if (segments.length === 0) throw new Error("No segments generated in script");
+
+  // The route's quota fallback is a fixed script; swap in a randomized local
+  // backup so degraded stretches don't loop the exact same talk
+  if (scriptDegraded) {
+    segments = BACKUP_SCRIPTS[Math.floor(Math.random() * BACKUP_SCRIPTS.length)].segments;
+  }
 
   // 3. Voice first; letters are only consumed once their answers can air
   const items = await synthesizeSegments(segments);
@@ -380,6 +386,7 @@ async function produceNextCorner() {
   }
 
   log(`Published corner: ${items.length} segments, letters=${letters.length}, degraded=${scriptDegraded}`);
+  return scriptDegraded;
 }
 
 // Airs a couple of station-call lines right away when a listener tunes in to
@@ -388,7 +395,8 @@ async function publishStationFiller() {
   const runwayEnd = await withTimeout(getRunwayEndMs(), 8_000, "runway");
   if (runwayEnd > Date.now() + 5_000) return; // something is already on air
 
-  const fillers = [...STATION_FILLERS].sort(() => Math.random() - 0.5).slice(0, 3);
+  // Two lines keep synthesis under ~5s so the voice starts almost immediately
+  const fillers = [...STATION_FILLERS].sort(() => Math.random() - 0.5).slice(0, 2);
   const items = await synthesizeSegments(fillers);
   await withTimeout(publishProgram(items, Date.now() + 1_500), 30_000, "publish-filler");
   log("Published station filler while the first corner is generated");
@@ -451,6 +459,10 @@ let lastGenAttempt = 0;
 let lastNewsCheck = 0;
 let lastCleanup = 0;
 let wasIdle = true;
+// While Gemini quota is exhausted, space the fallback corners out (BGM fills
+// the gaps) instead of looping canned talk every minute
+let degradedBackoffUntil = 0;
+const DEGRADED_BACKOFF_MS = 150_000;
 
 async function tick() {
   try {
@@ -489,14 +501,21 @@ async function tick() {
     }
 
     const runwayEnd = await withTimeout(getRunwayEndMs(), 8_000, "runway");
-    if (runwayEnd - Date.now() < RUNWAY_THRESHOLD_MS && now - lastGenAttempt > GEN_RETRY_MS && !isGenerating) {
+    if (
+      runwayEnd - Date.now() < RUNWAY_THRESHOLD_MS &&
+      now - lastGenAttempt > GEN_RETRY_MS &&
+      now > degradedBackoffUntil &&
+      !isGenerating
+    ) {
       lastGenAttempt = now;
       isGenerating = true;
       try {
-        await produceNextCorner();
+        const degraded = await produceNextCorner();
+        degradedBackoffUntil = degraded ? Date.now() + DEGRADED_BACKOFF_MS : 0;
       } catch (err) {
         logError("Corner production failed, trying backup:", err.message);
         await produceBackupCorner().catch((e) => logError("Backup production also failed:", e.message));
+        degradedBackoffUntil = Date.now() + DEGRADED_BACKOFF_MS;
       } finally {
         isGenerating = false;
       }

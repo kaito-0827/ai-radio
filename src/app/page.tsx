@@ -40,6 +40,9 @@ const GEN_RETRY_MS = 15_000; // minimum interval between generation attempts
 const NEWS_CHECK_INTERVAL_MS = 10 * 60_000; // breaking-news check cadence
 const CLEANUP_INTERVAL_MS = 60_000; // expired-segment cleanup cadence
 const PRODUCER_TICK_MS = 5_000;
+// Grace period before a browser tries to claim the producer lease, so the VPS
+// worker (which notices listeners within one 5s tick) always wins a cold start
+const PRODUCER_GRACE_MS = 12_000;
 
 const BACKUP_SCRIPTS: { segments: ScriptSegment[] }[] = [
   {
@@ -369,12 +372,16 @@ export default function Home() {
       }
     };
 
-    tick();
-    const interval = setInterval(tick, PRODUCER_TICK_MS);
+    let interval: ReturnType<typeof setInterval> | undefined;
+    const graceTimer = setTimeout(() => {
+      tick();
+      interval = setInterval(tick, PRODUCER_TICK_MS);
+    }, PRODUCER_GRACE_MS);
 
     return () => {
       cancelled = true;
-      clearInterval(interval);
+      clearTimeout(graceTimer);
+      if (interval) clearInterval(interval);
       setIsLeader(false);
       releaseLeadership(clientId);
     };
