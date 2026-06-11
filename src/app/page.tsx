@@ -473,13 +473,13 @@ export default function Home() {
   };
 
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-100 flex flex-col relative overflow-hidden">
+    <main className="min-h-screen bg-slate-950 text-slate-100 flex flex-col relative overflow-clip">
       {/* Dynamic colorful aura backgrounds */}
       <div className="absolute top-[-10%] left-[-10%] w-[50%] h-[50%] bg-purple-900/20 rounded-full blur-[120px] pointer-events-none" />
       <div className="absolute bottom-[-10%] right-[-10%] w-[50%] h-[50%] bg-indigo-900/20 rounded-full blur-[120px] pointer-events-none" />
 
       {/* Navigation Header */}
-      <header className="border-b border-slate-900 bg-slate-950/80 backdrop-blur-md sticky top-0 z-40 px-6 py-4 flex items-center justify-between">
+      <header className="border-b border-slate-900 bg-slate-950 sticky top-0 z-40 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center space-x-3">
           <div className="bg-gradient-to-tr from-purple-600 to-indigo-600 p-2 rounded-xl shadow-lg shadow-purple-500/25">
             <Radio className="w-6 h-6 text-white animate-pulse" />
