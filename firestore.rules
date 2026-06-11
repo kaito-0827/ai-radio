@@ -20,9 +20,5 @@ service cloud.firestore {
     match /artifacts/ai-radio-default/public/data/broadcast_news/{document} {
       allow read, write: if true;
     }
-    // Active listener heartbeats used by the VPS worker to pause when nobody is tuned in
-    match /artifacts/ai-radio-default/public/data/listener_presence/{document} {
-      allow read, write: if true;
-    }
   }
 }
