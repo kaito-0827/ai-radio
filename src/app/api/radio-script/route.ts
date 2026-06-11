@@ -126,7 +126,7 @@ ${lettersText}
     // On quota pressure: regular corners fall back to a canned script, but a
     // bulletin must never air canned content — return no segments instead so
     // the producer skips this bulletin and the news stays unclaimed.
-    const quotaFallback = breaking ? { segments: [] } : FALLBACK_SCRIPT;
+    const quotaFallback = breaking ? { segments: [] } : { ...FALLBACK_SCRIPT, degraded: true };
 
     if (!response) {
       return NextResponse.json(quotaFallback);

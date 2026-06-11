@@ -149,6 +149,7 @@ export default function Home() {
       }
 
       const scriptData = await scriptResponse.json();
+      const scriptDegraded = Boolean(scriptData.degraded);
       const segments: ScriptSegment[] = scriptData.segments || [];
 
       if (segments.length === 0) {
@@ -160,16 +161,18 @@ export default function Home() {
       const items = await synthesizeSegments(segments);
 
       try {
-        await withTimeout(
-          Promise.all(
-            letterDocIds.map((id) =>
-              updateDoc(doc(db, "artifacts", "ai-radio-default", "public", "data", "letters", id), { used: true })
-            )
-          ),
-          8_000,
-          "mark-letters"
-        );
-        setLetterCount(0);
+        if (!scriptDegraded && letterDocIds.length > 0) {
+          await withTimeout(
+            Promise.all(
+              letterDocIds.map((id) =>
+                updateDoc(doc(db, "artifacts", "ai-radio-default", "public", "data", "letters", id), { used: true })
+              )
+            ),
+            8_000,
+            "mark-letters"
+          );
+          setLetterCount(0);
+        }
       } catch (markErr) {
         console.error("Failed to mark letters as used (they may repeat):", markErr);
       }
@@ -179,13 +182,14 @@ export default function Home() {
       const startAt = Math.max(Date.now() + 2_000, runwayEnd);
       await withTimeout(publishProgram(items, startAt), 30_000, "publish");
 
-      fallbackAnnouncedRef.current = false;
+      if (!scriptDegraded) fallbackAnnouncedRef.current = false;
 
       // Post system announcement to Firestore chats (best-effort; never block
       // the broadcast pipeline). Corners can be generated every few minutes —
       // announce letter corners always, generic corners at most every 5 min
+      const shouldAnnounceLetter = letters.length > 0 && !scriptDegraded;
       let shouldAnnounceGeneric = false;
-      if (letters.length === 0) {
+      if (!shouldAnnounceLetter && !scriptDegraded) {
         try {
           shouldAnnounceGeneric = await withTimeout(
             claimGenericAnnouncement(5 * 60_000),
@@ -197,12 +201,23 @@ export default function Home() {
         }
       }
 
-      if (letters.length > 0 || shouldAnnounceGeneric) {
+      if (scriptDegraded && !fallbackAnnouncedRef.current) {
+        fallbackAnnouncedRef.current = true;
+        const chatsRef = collection(db, "artifacts", "ai-radio-default", "public", "data", "chats");
+        addDoc(chatsRef, {
+          user: "System",
+          text: `⚠️ 通信エラーが発生したため、自動フリートーク（バックアップモード）をオンエアしています。`,
+          createdAt: Date.now(),
+          isSystem: true,
+        }).catch((chatErr) => {
+          console.error("Failed to post fallback announcement to chat:", chatErr);
+        });
+      } else if (shouldAnnounceLetter || shouldAnnounceGeneric) {
         const chatsRef = collection(db, "artifacts", "ai-radio-default", "public", "data", "chats");
         addDoc(chatsRef, {
           user: "System",
           text:
-            letters.length > 0
+            shouldAnnounceLetter
               ? `📮 お便りコーナーがオンエアされます！(${letters.length}通のお便りを読み上げ)`
               : `🎙️ 新しいニュースコーナー「AIトレンド情報」のオンエアが始まりました！`,
           createdAt: Date.now(),
