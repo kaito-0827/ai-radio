@@ -1,20 +1,55 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { collection, query, where, getDocs, updateDoc, doc, limit, addDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
-import { getAudioEngine, ScriptSegment, AudioEngine } from "@/lib/audioEngine";
+import { getAudioEngine, ScriptSegment } from "@/lib/audioEngine";
 import { RadioVisualizer } from "@/components/RadioVisualizer";
 import { ChatBox } from "@/components/ChatBox";
 import { LetterModal } from "@/components/LetterModal";
-import { 
-  Radio, Play, Square, Volume2, Plus, Loader2, Sparkles, MessageCircle, 
-  HelpCircle, User, Rss, ArrowRight 
+import {
+  Radio, Play, Square, Plus, Loader2, Sparkles,
+  HelpCircle, Rss
 } from "lucide-react";
+
+interface Letter {
+  id: string;
+  sender?: string;
+  content?: string;
+}
+
+const BACKUP_SCRIPTS: { segments: ScriptSegment[] }[] = [
+  {
+    segments: [
+      { speaker: "Aoede", text: "リスナーの皆さん、えーあいらじおをお聞きいただきありがとうございます！", emotion: "happy" },
+      { speaker: "Charon", text: "はい、お聞きいただきありがとうございます。只今、最新ニュースの取得システムが少し混み合っているようです。", emotion: "calm" },
+      { speaker: "Aoede", text: "そんな時もありますよね。ということで、少しの間、私たちのフリートークをお届けします！", emotion: "excited" },
+      { speaker: "Charon", text: "そうですね。皆さんは最近、どんなテクノロジーに注目していますか？ぜひチャットで教えてくださいね。", emotion: "calm" },
+      { speaker: "Aoede", text: "それでは、引き続きえーあいらじおのLofi BGMとともに、ゆったりとお楽しみください！", emotion: "happy" }
+    ]
+  },
+  {
+    segments: [
+      { speaker: "Aoede", text: "さて、お便りのコーナーにいきたいところですが、ただいま電波の調子が悪いみたいです。", emotion: "sad" },
+      { speaker: "Charon", text: "そうですね、インターネットの宇宙を漂っているお便りを現在サーチ中です。", emotion: "calm" },
+      { speaker: "Aoede", text: "お便りはいつでも大歓迎ですので、ぜひ上のボタンから送ってみてくださいね！", emotion: "excited" },
+      { speaker: "Charon", text: "お送りいただいたメッセージは、電波が回復し次第、順次読み上げさせていただきます。", emotion: "calm" }
+    ]
+  },
+  {
+    segments: [
+      { speaker: "Aoede", text: "ここでちょっとした雑談ですが、AIによる対話って本当に不思議ですよね。", emotion: "happy" },
+      { speaker: "Charon", text: "そうですね。私たちのこの掛け合いも、リアルタイムに生成されて声になっているのが面白いところです。", emotion: "calm" },
+      { speaker: "Aoede", text: "たまに言葉が詰まったりするかもしれませんが、それもラジオの醍醐味として楽しんでもらえると嬉しいです！", emotion: "excited" },
+      { speaker: "Charon", text: "温かい目で見守ってください。それでは次のニュースの準備が整うまで、フリートークをお送りしました。", emotion: "calm" }
+    ]
+  }
+];
 
 export default function Home() {
   const [isPlaying, setIsPlaying] = useState(false);
-  const [audioEngine, setAudioEngine] = useState<AudioEngine | null>(null);
+  // The engine singleton is created lazily; AudioContext init happens on user gesture in start()
+  const [audioEngine] = useState(() => getAudioEngine());
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
   
   // UI states
@@ -26,98 +61,12 @@ export default function Home() {
 
   // Background state to prevent overlapping script generations
   const isGeneratingRef = useRef(false);
+  // Holds the latest generator so the retry timer can call it without self-reference
+  const retryGenerateRef = useRef<(() => void) | null>(null);
+  // Ensures the fallback announcement is posted to chat only once per failure streak
+  const fallbackAnnouncedRef = useRef(false);
 
-  useEffect(() => {
-    const engine = getAudioEngine();
-    if (engine) {
-      setAudioEngine(engine);
-      engine.init();
-      setAnalyser(engine.analyser);
-
-      // Listen to engine callbacks
-      engine.setCallbacks(
-        (segment) => {
-          setCurrentSegment(segment);
-          setStatusMessage(`${segment.speaker} がお話し中 (${segment.emotion})`);
-        },
-        () => {
-          setCurrentSegment(null);
-          setStatusMessage("BGM演奏中...");
-        },
-        () => {
-          // Trigger automatic next segment generation when queue runs empty
-          setStatusMessage("次のニュース台本を読み込んでいます...");
-          generateAndQueueNext();
-        }
-      );
-    }
-
-    // Check count of unread letters in Firestore to show badge
-    const checkUnreadLetters = async () => {
-      try {
-        const lettersRef = collection(db, "artifacts", "ai-radio-default", "public", "data", "letters");
-        const q = query(lettersRef, where("used", "==", false), limit(10));
-        const snap = await getDocs(q);
-        setLetterCount(snap.size);
-      } catch (e) {
-        console.error("Failed to query unread letters:", e);
-      }
-    };
-
-    checkUnreadLetters();
-    const interval = setInterval(checkUnreadLetters, 10000); // Check every 10s
-    return () => clearInterval(interval);
-  }, []);
-
-  const handleStartBroadcast = async () => {
-    if (!audioEngine) return;
-    
-    if (isPlaying) {
-      // Stop broadcast
-      audioEngine.stop();
-      setIsPlaying(false);
-      setCurrentSegment(null);
-      setStatusMessage("放送はスタンバイ状態です。開始ボタンを押してください。");
-    } else {
-      // Start broadcast
-      audioEngine.start();
-      setIsPlaying(true);
-      setStatusMessage("放送開始... BGM演奏中");
-      
-      // Auto trigger first script generation if queue is empty
-      generateAndQueueNext();
-    }
-  };
-
-  const BACKUP_SCRIPTS: { segments: ScriptSegment[] }[] = [
-    {
-      segments: [
-        { speaker: "Aoede", text: "リスナーの皆さん、えーあいらじおをお聞きいただきありがとうございます！", emotion: "happy" },
-        { speaker: "Charon", text: "はい、お聞きいただきありがとうございます。只今、最新ニュースの取得システムが少し混み合っているようです。", emotion: "calm" },
-        { speaker: "Aoede", text: "そんな時もありますよね。ということで、少しの間、私たちのフリートークをお届けします！", emotion: "excited" },
-        { speaker: "Charon", text: "そうですね。皆さんは最近、どんなテクノロジーに注目していますか？ぜひチャットで教えてくださいね。", emotion: "calm" },
-        { speaker: "Aoede", text: "それでは、引き続きえーあいらじおのLofi BGMとともに、ゆったりとお楽しみください！", emotion: "happy" }
-      ]
-    },
-    {
-      segments: [
-        { speaker: "Aoede", text: "さて、お便りのコーナーにいきたいところですが、ただいま電波の調子が悪いみたいです。", emotion: "sad" },
-        { speaker: "Charon", text: "そうですね、インターネットの宇宙を漂っているお便りを現在サーチ中です。", emotion: "calm" },
-        { speaker: "Aoede", text: "お便りはいつでも大歓迎ですので、ぜひ上のボタンから送ってみてくださいね！", emotion: "excited" },
-        { speaker: "Charon", text: "お送りいただいたメッセージは、電波が回復し次第、順次読み上げさせていただきます。", emotion: "calm" }
-      ]
-    },
-    {
-      segments: [
-        { speaker: "Aoede", text: "ここでちょっとした雑談ですが、AIによる対話って本当に不思議ですよね。", emotion: "happy" },
-        { speaker: "Charon", text: "そうですね。私たちのこの掛け合いも、リアルタイムに生成されて声になっているのが面白いところです。", emotion: "calm" },
-        { speaker: "Aoede", text: "たまに言葉が詰まったりするかもしれませんが、それもラジオの醍醐味として楽しんでもらえると嬉しいです！", emotion: "excited" },
-        { speaker: "Charon", text: "温かい目で見守ってください。それでは次のニュースの準備が整うまで、フリートークをお送りしました。", emotion: "calm" }
-      ]
-    }
-  ];
-
-  const generateAndQueueNext = async () => {
+  const generateAndQueueNext = useCallback(async () => {
     if (!audioEngine || isGeneratingRef.current) return;
     isGeneratingRef.current = true;
     setIsLoading(true);
@@ -128,7 +77,7 @@ export default function Home() {
       const q = query(lettersRef, where("used", "==", false), limit(3));
       const querySnapshot = await getDocs(q);
       
-      const letters: any[] = [];
+      const letters: Letter[] = [];
       const letterDocIds: string[] = [];
       querySnapshot.forEach((doc) => {
         letters.push({ id: doc.id, ...doc.data() });
@@ -161,18 +110,17 @@ export default function Home() {
       );
       setLetterCount(0);
 
-      // Post system announcement to Firestore chats
-      try {
-        const chatsRef = collection(db, "artifacts", "ai-radio-default", "public", "data", "chats");
-        await addDoc(chatsRef, {
-          user: "System",
-          text: `🎙️ 新しいニュースコーナー「AIトレンド情報」のオンエアが始まりました！`,
-          createdAt: Date.now(),
-          isSystem: true,
-        });
-      } catch (chatErr) {
+      // Post system announcement to Firestore chats (best-effort; never block the broadcast pipeline)
+      fallbackAnnouncedRef.current = false;
+      const chatsRef = collection(db, "artifacts", "ai-radio-default", "public", "data", "chats");
+      addDoc(chatsRef, {
+        user: "System",
+        text: `🎙️ 新しいニュースコーナー「AIトレンド情報」のオンエアが始まりました！`,
+        createdAt: Date.now(),
+        isSystem: true,
+      }).catch((chatErr) => {
         console.error("Failed to post system announcement to chat:", chatErr);
-      }
+      });
 
       // 3. Generate TTS audio sequentially to avoid Gemini quota spikes
       const ttsResults = [];
@@ -200,7 +148,7 @@ export default function Home() {
       });
 
       setStatusMessage("新しい台本と音声をロードしました。順次放送します。");
-    } catch (error: any) {
+    } catch (error) {
       console.error("Error in broadcasting sequence, falling back to backup script:", error);
       setStatusMessage(`一時的な通信エラーのため、バックアップ台本でお送りしています。`);
       
@@ -209,16 +157,19 @@ export default function Home() {
         const randomBackup = BACKUP_SCRIPTS[Math.floor(Math.random() * BACKUP_SCRIPTS.length)];
         const backupSegments = randomBackup.segments;
 
-        // Post system announcement about fallback
-        try {
+        // Post system announcement about fallback (best-effort, once per failure streak)
+        if (!fallbackAnnouncedRef.current) {
+          fallbackAnnouncedRef.current = true;
           const chatsRef = collection(db, "artifacts", "ai-radio-default", "public", "data", "chats");
-          await addDoc(chatsRef, {
+          addDoc(chatsRef, {
             user: "System",
             text: `⚠️ 通信エラーが発生したため、自動フリートーク（バックアップモード）をオンエアしています。`,
             createdAt: Date.now(),
             isSystem: true,
+          }).catch(() => {
+            // Chat announcement is best-effort; ignore failures
           });
-        } catch (chatErr) {}
+        }
 
         // Generate TTS audio sequentially to avoid Gemini quota spikes
         const ttsResults = [];
@@ -245,18 +196,80 @@ export default function Home() {
         });
 
         setStatusMessage("バックアップ台本と音声をロードしました。順次放送します。");
-      } catch (fallbackErr: any) {
+      } catch (fallbackErr) {
         console.error("Critical error: Fallback script also failed.", fallbackErr);
         setStatusMessage(`完全なシステムエラーが発生しました。5秒後に再試行します。`);
-        
-        // Final fallback retry after delay
+
+        // Final fallback retry after delay; read live engine state to avoid a stale isPlaying closure
         setTimeout(() => {
-          if (isPlaying) generateAndQueueNext();
+          if (audioEngine.isPlaying) retryGenerateRef.current?.();
         }, 5000);
       }
     } finally {
       setIsLoading(false);
       isGeneratingRef.current = false;
+    }
+  }, [audioEngine]);
+
+  useEffect(() => {
+    retryGenerateRef.current = generateAndQueueNext;
+  }, [generateAndQueueNext]);
+
+  useEffect(() => {
+    if (audioEngine) {
+      // Listen to engine callbacks
+      audioEngine.setCallbacks(
+        (segment) => {
+          setCurrentSegment(segment);
+          setStatusMessage(`${segment.speaker} がお話し中 (${segment.emotion})`);
+        },
+        () => {
+          setCurrentSegment(null);
+          setStatusMessage("BGM演奏中...");
+        },
+        () => {
+          // Trigger automatic next segment generation when queue runs empty
+          setStatusMessage("次のニュース台本を読み込んでいます...");
+          generateAndQueueNext();
+        }
+      );
+    }
+
+    // Check count of unread letters in Firestore to show badge
+    const checkUnreadLetters = async () => {
+      try {
+        const lettersRef = collection(db, "artifacts", "ai-radio-default", "public", "data", "letters");
+        const q = query(lettersRef, where("used", "==", false), limit(10));
+        const snap = await getDocs(q);
+        setLetterCount(snap.size);
+      } catch (e) {
+        console.error("Failed to query unread letters:", e);
+      }
+    };
+
+    checkUnreadLetters();
+    const interval = setInterval(checkUnreadLetters, 10000); // Check every 10s
+    return () => clearInterval(interval);
+  }, [audioEngine, generateAndQueueNext]);
+
+  const handleStartBroadcast = () => {
+    if (!audioEngine) return;
+
+    if (isPlaying) {
+      // Stop broadcast
+      audioEngine.stop();
+      setIsPlaying(false);
+      setCurrentSegment(null);
+      setStatusMessage("放送はスタンバイ状態です。開始ボタンを押してください。");
+    } else {
+      // Start broadcast; the AudioContext is created here, on the user gesture
+      audioEngine.start();
+      setAnalyser(audioEngine.analyser);
+      setIsPlaying(true);
+      setStatusMessage("放送開始... BGM演奏中");
+
+      // Auto trigger first script generation if queue is empty
+      generateAndQueueNext();
     }
   };
 
@@ -447,11 +460,13 @@ export default function Home() {
         &copy; 2026 えーあいらじお (AI Radio). All rights reserved.
       </footer>
 
-      {/* Letter Modal */}
-      <LetterModal
-        isOpen={isLetterModalOpen}
-        onClose={() => setIsLetterModalOpen(false)}
-      />
+      {/* Letter Modal (mounted on open so it re-reads the stored radio name) */}
+      {isLetterModalOpen && (
+        <LetterModal
+          isOpen={isLetterModalOpen}
+          onClose={() => setIsLetterModalOpen(false)}
+        />
+      )}
     </main>
   );
 }

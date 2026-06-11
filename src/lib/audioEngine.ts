@@ -20,7 +20,7 @@ export class AudioEngine {
   ttsVolume: number = 1.0;
   
   // Sequencer properties
-  private seqIntervalId: any = null;
+  private seqIntervalId: ReturnType<typeof setInterval> | null = null;
   private currentBeat: number = 0;
   private bpm: number = 72;
   private lastScheduledTime: number = 0;
@@ -39,7 +39,9 @@ export class AudioEngine {
   init() {
     if (this.ctx) return;
     
-    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    const AudioContextClass =
+      window.AudioContext ||
+      (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
     this.ctx = new AudioContextClass();
     
     // Create nodes
@@ -423,7 +425,9 @@ export class AudioEngine {
       this.currentTtsSource.onended = null;
       try {
         this.currentTtsSource.stop();
-      } catch (e) {}
+      } catch {
+        // Source may already be stopped; nothing to clean up
+      }
       this.currentTtsSource = null;
     }
     this.ttsQueue = [];

@@ -41,15 +41,17 @@ function parseScriptJson(text: string) {
 
 export async function POST(req: Request) {
   try {
-    const { letters } = await req.json();
+    const { letters } = (await req.json()) as {
+      letters?: { sender?: string; content?: string }[];
+    };
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
       return NextResponse.json({ error: "GEMINI_API_KEY is not configured" }, { status: 500 });
     }
 
     // Format letters
-    const lettersText = letters && letters.length > 0 
-      ? letters.map((l: any) => `[差出人: ${l.sender}] ${l.content}`).join("\n")
+    const lettersText = letters && letters.length > 0
+      ? letters.map((l) => `[差出人: ${l.sender}] ${l.content}`).join("\n")
       : "本日のお便りはまだ届いていません。";
 
     const systemInstruction = `
@@ -130,7 +132,8 @@ ${lettersText}
     scriptJson.segments = scriptJson.segments.slice(0, 4);
 
     return NextResponse.json(scriptJson);
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message || "Internal Server Error" }, { status: 500 });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Internal Server Error";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

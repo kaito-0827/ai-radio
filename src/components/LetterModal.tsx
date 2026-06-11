@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 import { collection, addDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { X, Send, Heart } from "lucide-react";
@@ -9,19 +9,14 @@ interface LetterModalProps {
 }
 
 export const LetterModal: React.FC<LetterModalProps> = ({ isOpen, onClose }) => {
-  const [sender, setSender] = useState("");
+  // The modal is mounted each time it opens, so the stored radio name is read on open
+  const [sender, setSender] = useState(() => {
+    if (typeof window === "undefined") return "";
+    return localStorage.getItem("ai-radio-username") ?? "";
+  });
   const [content, setContent] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
-
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      const storedName = localStorage.getItem("ai-radio-username");
-      if (storedName) {
-        setSender(storedName);
-      }
-    }
-  }, [isOpen]);
 
   if (!isOpen) return null;
 

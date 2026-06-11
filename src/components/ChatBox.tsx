@@ -14,22 +14,22 @@ interface ChatMessage {
 export const ChatBox: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputText, setInputText] = useState("");
-  const [userName, setUserName] = useState("");
+  // Restore the stored radio name, or generate a random anonymous one
+  const [userName, setUserName] = useState(() => {
+    if (typeof window === "undefined") return "";
+    return (
+      localStorage.getItem("ai-radio-username") ??
+      `リスナー${Math.floor(100 + Math.random() * 900)}`
+    );
+  });
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Initialize random anonymous username if not set in localStorage
+  // Persist the generated name on first visit
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      const storedName = localStorage.getItem("ai-radio-username");
-      if (storedName) {
-        setUserName(storedName);
-      } else {
-        const randName = `リスナー${Math.floor(100 + Math.random() * 900)}`;
-        setUserName(randName);
-        localStorage.setItem("ai-radio-username", randName);
-      }
+    if (userName && !localStorage.getItem("ai-radio-username")) {
+      localStorage.setItem("ai-radio-username", userName);
     }
-  }, []);
+  }, [userName]);
 
   // Listen to Firestore chat collection
   useEffect(() => {
