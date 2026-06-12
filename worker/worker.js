@@ -26,7 +26,6 @@ import {
   orderBy,
   query,
   runTransaction,
-  updateDoc,
   deleteDoc,
   where,
   writeBatch,
@@ -210,6 +209,11 @@ async function getRunwayEndMs() {
 async function publishProgram(items, firstAirAt, opts = {}) {
   const batch = writeBatch(db);
   let airAt = firstAirAt;
+  // Letters answered by this program are consumed in the same atomic batch,
+  // so a partial failure can never re-read or drop a letter
+  for (const letterId of opts.markUsedLetterIds ?? []) {
+    batch.update(doc(col("letters"), letterId), { used: true });
+  }
   for (const { segment, audioBase64 } of items) {
     const durationMs = audioDurationMs(audioBase64);
     const segRef = doc(col("broadcast"));
@@ -369,18 +373,16 @@ async function produceNextCorner() {
   // 3. Voice first; letters are only consumed once their answers can air
   const items = await synthesizeSegments(segments);
 
-  if (!scriptDegraded && letters.length > 0) {
-    await withTimeout(
-      Promise.all(letters.map((l) => updateDoc(doc(col("letters"), l.id), { used: true }))),
-      8_000,
-      "mark-letters"
-    ).catch((e) => logError("Failed to mark letters as used:", e.message));
-  }
-
-  // 4. Publish
+  // 4. Publish (letters are marked as used inside the same atomic batch)
   const runwayEnd = await withTimeout(getRunwayEndMs(), 8_000, "runway");
   const startAt = Math.max(Date.now() + 2_000, runwayEnd);
-  await withTimeout(publishProgram(items, startAt), 30_000, "publish");
+  await withTimeout(
+    publishProgram(items, startAt, {
+      markUsedLetterIds: scriptDegraded ? [] : letters.map((l) => l.id),
+    }),
+    30_000,
+    "publish"
+  );
 
   // 5. Announce
   if (scriptDegraded) {
