@@ -119,6 +119,10 @@ const BACKUP_SCRIPTS = [
 const log = (...args) => console.log(new Date().toISOString(), ...args);
 const logError = (...args) => console.error(new Date().toISOString(), ...args);
 
+// fetch that cannot hang the producer loop: aborts after the deadline
+const fetchWithTimeout = (url, options = {}, ms = 30_000) =>
+  fetch(url, { ...options, signal: AbortSignal.timeout(ms) });
+
 function withTimeout(promise, ms, label) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
@@ -183,6 +187,14 @@ async function cleanupStalePresence() {
       await deleteDoc(d.ref).catch(() => {});
     }
   }
+}
+
+// The live chat is ephemeral by design; prune messages older than 24h so the
+// collection (and the client's newest-100 window) stays healthy
+async function cleanupOldChats() {
+  const q = query(col("chats"), where("createdAt", "<", Date.now() - 24 * 60 * 60_000), limit(20));
+  const snap = await getDocs(q);
+  await Promise.all(snap.docs.map((d) => deleteDoc(d.ref).catch(() => {})));
 }
 
 // --- Timeline ------------------------------------------------------------------
@@ -310,11 +322,11 @@ async function synthesizeSegments(segments) {
       audioBase64 = await withTimeout(synthesizeVoicevox(segment.text, segment.emotion), 60_000, "voicevox");
     } catch (err) {
       logError("VOICEVOX failed, falling back to /api/radio-tts:", err.message);
-      const res = await fetch(`${APP_BASE_URL}/api/radio-tts`, {
+      const res = await fetchWithTimeout(`${APP_BASE_URL}/api/radio-tts`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: segment.text, speaker: segment.speaker, emotion: segment.emotion }),
-      });
+      }, 45_000);
       if (!res.ok) throw new Error(`TTS fallback failed for segment: ${res.status}`);
       audioBase64 = (await res.json()).audioContent;
     }
@@ -337,11 +349,11 @@ async function produceNextCorner() {
   const letters = unread.slice(0, 3);
 
   // 2. Script via the deployed route (prompts live in one place)
-  const scriptRes = await fetch(`${APP_BASE_URL}/api/radio-script`, {
+  const scriptRes = await fetchWithTimeout(`${APP_BASE_URL}/api/radio-script`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ letters }),
-  });
+  }, 90_000);
   if (!scriptRes.ok) throw new Error(`radio-script failed: ${scriptRes.status}`);
   const scriptData = await scriptRes.json();
   const scriptDegraded = Boolean(scriptData.degraded);
@@ -416,20 +428,20 @@ async function produceBackupCorner() {
 
 async function checkBreakingNews() {
   const seenHeadlines = await withTimeout(getRecentNewsHeadlines(), 8_000, "news-history");
-  const newsRes = await fetch(`${APP_BASE_URL}/api/breaking-news`, {
+  const newsRes = await fetchWithTimeout(`${APP_BASE_URL}/api/breaking-news`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ seenHeadlines }),
-  });
+  }, 60_000);
   if (!newsRes.ok) return;
   const news = await newsRes.json();
   if (!news.hasBreaking || !news.id || !news.headline) return;
 
-  const scriptRes = await fetch(`${APP_BASE_URL}/api/radio-script`, {
+  const scriptRes = await fetchWithTimeout(`${APP_BASE_URL}/api/radio-script`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ breaking: { headline: news.headline, summary: news.summary } }),
-  });
+  }, 90_000);
   if (!scriptRes.ok) return;
   const scriptData = await scriptRes.json();
   const segments = scriptData.segments || [];
@@ -472,6 +484,7 @@ async function tick() {
       lastCleanup = now;
       cleanupExpiredSegments().catch((e) => logError("Cleanup failed:", e.message));
       cleanupStalePresence().catch(() => {});
+      cleanupOldChats().catch(() => {});
     }
 
     // Check presence BEFORE touching the lease: while nobody is listening the

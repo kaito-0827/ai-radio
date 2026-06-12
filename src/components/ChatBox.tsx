@@ -22,7 +22,7 @@ export const ChatBox: React.FC = () => {
       `リスナー${Math.floor(100 + Math.random() * 900)}`
     );
   });
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesBoxRef = useRef<HTMLDivElement>(null);
 
   // Persist the generated name on first visit
   useEffect(() => {
@@ -35,7 +35,9 @@ export const ChatBox: React.FC = () => {
   useEffect(() => {
     // Nested Firestore Collection path: /artifacts/ai-radio-default/public/data/chats
     const chatsRef = collection(db, "artifacts", "ai-radio-default", "public", "data", "chats");
-    const q = query(chatsRef, orderBy("createdAt", "asc"), limit(100));
+    // Newest 100 messages; ascending order would pin the window to the oldest
+    // 100 docs and silently hide everything after that
+    const q = query(chatsRef, orderBy("createdAt", "desc"), limit(100));
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const msgs: ChatMessage[] = [];
@@ -49,6 +51,7 @@ export const ChatBox: React.FC = () => {
           isSystem: data.isSystem || false,
         });
       });
+      msgs.reverse();
       setMessages(msgs);
     }, (error) => {
       console.error("Error reading chats from Firestore:", error);
@@ -57,9 +60,11 @@ export const ChatBox: React.FC = () => {
     return () => unsubscribe();
   }, []);
 
-  // Auto-scroll to bottom when messages update
+  // Auto-scroll the message list (only the list — scrollIntoView would also
+  // yank the whole page down to the chat on load and on every new message)
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const box = messagesBoxRef.current;
+    if (box) box.scrollTop = box.scrollHeight;
   }, [messages]);
 
   const handleSendMessage = async (e: React.FormEvent) => {
@@ -111,7 +116,7 @@ export const ChatBox: React.FC = () => {
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-3 scrollbar-thin scrollbar-thumb-slate-800 scrollbar-track-transparent">
+      <div ref={messagesBoxRef} className="flex-1 overflow-y-auto p-4 space-y-3 scrollbar-thin scrollbar-thumb-slate-800 scrollbar-track-transparent">
         {messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-slate-500 text-xs space-y-1">
             <p>まだチャットメッセージはありません</p>
@@ -154,7 +159,6 @@ export const ChatBox: React.FC = () => {
             </div>
           ))
         )}
-        <div ref={messagesEndRef} />
       </div>
 
       {/* Input */}
