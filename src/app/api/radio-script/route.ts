@@ -87,7 +87,7 @@ ${characterNote}
 - その後、最新ニュースを1つか2つ紹介し、わかりやすく解説します。
 - 最後は次のコーナーに自然につながる一言で締めます（番組全体の終了の挨拶はしない）。
 - 一人語りですが、リスナーへの問いかけや独り言、小ボケを交えてテンポよく、退屈させないようにしてください。
-- 1セグメントは1〜3文程度にしてください。
+- 合成を軽くするため、1セグメントは1〜2文・最大50文字程度に簡潔にまとめてください。
 - 応答はJSONオブジェクトのみを返してください。Markdownや説明文は不要です。
 - JSON形式は {"segments":[{"speaker":"ずんだもん","text":"...","emotion":"happy"}]} です。
 - speaker は必ず "ずんだもん" です。
@@ -124,7 +124,7 @@ ${characterNote}
       ? "このニュースを検索で確認し、ラジオのニュース速報台本（2〜4セグメント）をJSONで作ってください。"
       : quick
         ? "番組オープニングの短いつなぎトーク（3〜4セグメント）をJSONで作ってください。"
-        : "最新のテクノロジーニュースを検索して取り入れつつ、お便りにも答える面白いラジオ台本（4〜8セグメント）を作ってください。お便りがある場合は必ず冒頭で回答してください。";
+        : "最新のテクノロジーニュースを検索して取り入れつつ、お便りにも答える面白いラジオ台本（4〜6セグメント、各セグメントは簡潔に）を作ってください。お便りがある場合は必ず冒頭で回答してください。";
 
     // Search grounding is what makes generation slow; the quick opener skips it
     const tools = quick && !breaking ? [] : [{ googleSearch: {} }];
@@ -183,7 +183,7 @@ ${characterNote}
     }
     // Cap generously: letter answers sit mid-script, so a tight cap would
     // silently drop consumed letters without ever airing them
-    scriptJson.segments = scriptJson.segments.slice(0, 8);
+    scriptJson.segments = scriptJson.segments.slice(0, 6);
 
     return NextResponse.json(scriptJson);
   } catch (error) {

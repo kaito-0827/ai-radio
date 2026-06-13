@@ -333,11 +333,12 @@ async function synthOne(segment) {
   }
 }
 
-// Synthesize with bounded concurrency (the VPS has 2 vCPUs, so 2 keeps both
-// busy without thrashing) while preserving segment order. Cuts the synthesis
-// phase of an 8-segment corner roughly in half versus sequential.
+// Synthesize with bounded concurrency, preserving segment order.
+// NOTE: on the current 1GB VPS, VOICEVOX runs in swap, so two simultaneous
+// syntheses contend for memory/disk. Keep this at 1; raise to 2-3 only after
+// the box has >=2GB RAM.
 async function synthesizeSegments(segments) {
-  const CONCURRENCY = 2;
+  const CONCURRENCY = 1;
   const items = new Array(segments.length);
   let next = 0;
   async function pump() {
