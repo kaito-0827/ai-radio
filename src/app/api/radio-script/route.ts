@@ -28,9 +28,10 @@ const FALLBACK_SCRIPT = {
 
 export async function POST(req: Request) {
   try {
-    const { letters, breaking } = (await req.json()) as {
+    const { letters, breaking, quick } = (await req.json()) as {
       letters?: { sender?: string; content?: string }[];
       breaking?: { headline?: string; summary?: string };
+      quick?: boolean;
     };
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
@@ -96,10 +97,37 @@ ${characterNote}
 ${lettersText}
 `;
 
-    const systemInstruction = breaking ? bulletinInstruction : regularInstruction;
+    // Quick mode: a short opener with NO Google Search, so it generates in a
+    // few seconds. Used at cold start to start talking before the heavier
+    // search-grounded corner is ready.
+    const quickInstruction = `
+あなたはラジオ番組「えーあいらじお（AI Radio）」のパーソナリティ「ずんだもん」です。
+番組のオープニングを飾る、短くて元気なつなぎトークの台本を作ってください。最新ニュースの紹介は不要です。
+${characterNote}
+構成ルール：
+- リスナーへの軽い挨拶から始め、この番組がAIやテクノロジーの話題をお届けする生放送であることを楽しく紹介します。
+- ずんだもんらしい小ネタや、リスナーへの問いかけを交えてテンポよく進めます。
+- 「このあと、最新ニュースもたっぷりお届けするのだ！」のように、本編への期待を持たせて締めます。
+- 3〜4セグメントにしてください。1セグメントは1〜2文程度。
+- 応答はJSONオブジェクトのみを返してください。Markdownや説明文は不要です。
+- JSON形式は {"segments":[{"speaker":"ずんだもん","text":"...","emotion":"happy"}]} です。
+- speaker は必ず "ずんだもん" です。
+- emotion は "happy", "calm", "excited", "sad" のいずれかです。
+`;
+
+    const systemInstruction = breaking
+      ? bulletinInstruction
+      : quick
+        ? quickInstruction
+        : regularInstruction;
     const prompt = breaking
       ? "このニュースを検索で確認し、ラジオのニュース速報台本（2〜4セグメント）をJSONで作ってください。"
-      : "最新のテクノロジーニュースを検索して取り入れつつ、お便りにも答える面白いラジオ台本（4〜8セグメント）を作ってください。お便りがある場合は必ず冒頭で回答してください。";
+      : quick
+        ? "番組オープニングの短いつなぎトーク（3〜4セグメント）をJSONで作ってください。"
+        : "最新のテクノロジーニュースを検索して取り入れつつ、お便りにも答える面白いラジオ台本（4〜8セグメント）を作ってください。お便りがある場合は必ず冒頭で回答してください。";
+
+    // Search grounding is what makes generation slow; the quick opener skips it
+    const tools = quick && !breaking ? [] : [{ googleSearch: {} }];
 
     let response: Response | null = null;
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -118,11 +146,7 @@ ${lettersText}
           systemInstruction: {
             parts: [{ text: systemInstruction }]
           },
-          tools: [
-            {
-              googleSearch: {}
-            }
-          ]
+          tools
         })
       });
 

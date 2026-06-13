@@ -318,24 +318,35 @@ async function synthesizeVoicevox(text, emotion) {
   return wavToPcmBase64(Buffer.from(await synthRes.arrayBuffer()));
 }
 
-async function synthesizeSegments(segments) {
-  const items = [];
-  for (const segment of segments) {
-    let audioBase64;
-    try {
-      audioBase64 = await withTimeout(synthesizeVoicevox(segment.text, segment.emotion), 60_000, "voicevox");
-    } catch (err) {
-      logError("VOICEVOX failed, falling back to /api/radio-tts:", err.message);
-      const res = await fetchWithTimeout(`${APP_BASE_URL}/api/radio-tts`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: segment.text, speaker: segment.speaker, emotion: segment.emotion }),
-      }, 45_000);
-      if (!res.ok) throw new Error(`TTS fallback failed for segment: ${res.status}`);
-      audioBase64 = (await res.json()).audioContent;
-    }
-    items.push({ segment, audioBase64 });
+async function synthOne(segment) {
+  try {
+    return await withTimeout(synthesizeVoicevox(segment.text, segment.emotion), 60_000, "voicevox");
+  } catch (err) {
+    logError("VOICEVOX failed, falling back to /api/radio-tts:", err.message);
+    const res = await fetchWithTimeout(`${APP_BASE_URL}/api/radio-tts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: segment.text, speaker: segment.speaker, emotion: segment.emotion }),
+    }, 45_000);
+    if (!res.ok) throw new Error(`TTS fallback failed for segment: ${res.status}`);
+    return (await res.json()).audioContent;
   }
+}
+
+// Synthesize with bounded concurrency (the VPS has 2 vCPUs, so 2 keeps both
+// busy without thrashing) while preserving segment order. Cuts the synthesis
+// phase of an 8-segment corner roughly in half versus sequential.
+async function synthesizeSegments(segments) {
+  const CONCURRENCY = 2;
+  const items = new Array(segments.length);
+  let next = 0;
+  async function pump() {
+    while (next < segments.length) {
+      const i = next++;
+      items[i] = { segment: segments[i], audioBase64: await synthOne(segments[i]) };
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, segments.length) }, pump));
   return items;
 }
 
@@ -353,6 +364,7 @@ async function produceNextCorner() {
   const letters = unread.slice(0, 3);
 
   // 2. Script via the deployed route (prompts live in one place)
+  const tStart = Date.now();
   const scriptRes = await fetchWithTimeout(`${APP_BASE_URL}/api/radio-script`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -371,7 +383,9 @@ async function produceNextCorner() {
   }
 
   // 3. Voice first; letters are only consumed once their answers can air
+  const tScript = Date.now();
   const items = await synthesizeSegments(segments);
+  const tSynth = Date.now();
 
   // 4. Publish (letters are marked as used inside the same atomic batch)
   const runwayEnd = await withTimeout(getRunwayEndMs(), 8_000, "runway");
@@ -399,7 +413,10 @@ async function produceNextCorner() {
     }
   }
 
-  log(`Published corner: ${items.length} segments, letters=${letters.length}, degraded=${scriptDegraded}`);
+  log(
+    `Published corner: ${items.length} segments, letters=${letters.length}, ` +
+      `degraded=${scriptDegraded}, script=${tScript - tStart}ms synth=${tSynth - tScript}ms`
+  );
   return scriptDegraded;
 }
 
@@ -414,6 +431,37 @@ async function publishStationFiller() {
   const items = await synthesizeSegments(fillers);
   await withTimeout(publishProgram(items, Date.now() + 1_500), 30_000, "publish-filler");
   log("Published station filler while the first corner is generated");
+}
+
+// A lightweight opener (no Google Search) generated in seconds, queued right
+// after the station filler. It bridges the ~2 min it takes the first
+// search-grounded corner to generate, so a cold start isn't all BGM.
+async function publishQuickOpener() {
+  const scriptRes = await fetchWithTimeout(
+    `${APP_BASE_URL}/api/radio-script`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ quick: true }),
+    },
+    45_000
+  );
+  if (!scriptRes.ok) return;
+  const scriptData = await scriptRes.json();
+  // On quota pressure the route returns the degraded canned script; the filler
+  // and the backup-corner path already cover that case, so skip here
+  if (scriptData.degraded) return;
+  const segments = scriptData.segments || [];
+  if (segments.length === 0) return;
+
+  const items = await synthesizeSegments(segments);
+  const runwayEnd = await withTimeout(getRunwayEndMs(), 8_000, "runway");
+  await withTimeout(
+    publishProgram(items, Math.max(Date.now() + 1_500, runwayEnd)),
+    30_000,
+    "publish-quick"
+  );
+  log(`Published quick opener: ${items.length} segments`);
 }
 
 async function produceBackupCorner() {
@@ -511,8 +559,11 @@ async function tick() {
     }
 
     // First listener after an idle period: get a voice on air within seconds
+    // (filler), then bridge to the heavy first corner with a fast no-search
+    // opener so the cold start isn't ~2 min of BGM
     if (resumed) {
       await publishStationFiller().catch((e) => logError("Station filler failed:", e.message));
+      await publishQuickOpener().catch((e) => logError("Quick opener failed:", e.message));
     }
 
     const runwayEnd = await withTimeout(getRunwayEndMs(), 8_000, "runway");
